@@ -52,6 +52,27 @@ stages:
               python -m pip install -r requirements-deploy.txt
             displayName: Install fabric-cicd
 
+          # Pre-download Presidio wheels from pypi.org on the agent (which
+          # has internet) into the Environment's CustomLibraries/ folder.
+          # fabric-cicd then uploads them to the DEP workspace where
+          # pypi.org is unreachable during environment publish.
+          - powershell: |
+              $ErrorActionPreference = 'Stop'
+              $dest = 'workspace/16_presidio/Presidio.Environment/Libraries/CustomLibraries'
+              New-Item -ItemType Directory -Force -Path $dest | Out-Null
+              Get-ChildItem -Path $dest -Include *.whl,*.tar.gz -File -Recurse | Remove-Item -Force
+              python -m pip download -r requirements-presidio.txt `
+                --dest $dest `
+                --only-binary=:all: `
+                --python-version 3.11 `
+                --platform manylinux2014_x86_64 `
+                --implementation cp `
+                --abi cp311
+              if ($LASTEXITCODE -ne 0) { throw "pip download failed" }
+              Write-Host "Vendored wheels:"
+              Get-ChildItem $dest | Format-Table Name, Length
+            displayName: Vendor Presidio wheels
+
           # Authenticate to Azure using the service connection, then export
           # the resulting access token as AZURE_* env vars so that
           # DefaultAzureCredential picks them up inside deploy.py.
