@@ -42,15 +42,14 @@ stages:
           - checkout: self
             displayName: Checkout sources
 
-          - task: UsePythonVersion@0
-            displayName: Use Python $(pythonVersion)
-            inputs:
-              versionSpec: "$(pythonVersion)"
-              addToPath: true
+          - script: |
+              python --version
+              python -m pip --version
+            displayName: Show pre-installed Python
 
           - script: |
               python -m pip install --upgrade pip
-              pip install -r requirements-deploy.txt
+              python -m pip install -r requirements-deploy.txt
             displayName: Install fabric-cicd
 
           # Authenticate to Azure using the service connection, then export
