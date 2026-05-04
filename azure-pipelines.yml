@@ -62,7 +62,7 @@ stages:
               FABRIC_ENVIRONMENT: $(FABRIC_ENVIRONMENT)
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
-              scriptType: pscore
+              scriptType: ps
               scriptLocation: inlineScript
               addSpnToEnvironment: true
               inlineScript: |
