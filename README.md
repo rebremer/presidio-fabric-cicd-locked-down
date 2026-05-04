@@ -58,7 +58,8 @@ anonymization) into a Microsoft Fabric **Environment** item using
 .
 ├── azure-pipelines.yml             # ADO pipeline definition
 ├── deploy.py                       # fabric-cicd entry point
-├── requirements-deploy.txt         # fabric-cicd + azure-identity
+├── requirements-deploy.txt         # fabric-cicd + azure-identity (agent)
+├── requirements-presidio.txt       # Presidio wheels vendored into Env
 ├── scripts/
 │   └── setup-agent.ps1             # one-shot bootstrap for the ADO agent VM
 └── workspace/
@@ -68,8 +69,8 @@ anonymization) into a Microsoft Fabric **Environment** item using
         │   ├── .platform
         │   ├── Setting/Sparkcompute.yml
         │   └── Libraries/
-        │       ├── environment.yml          # public PyPI deps
-        │       └── CustomLibraries/.gitkeep # drop wheels here for DEP
+        │       ├── environment.yml          # conda only (python, pip)
+        │       └── CustomLibraries/         # wheels populated by pipeline
         └── PresidioSmokeTest.Notebook/
             ├── .platform
             └── notebook-content.py
@@ -131,25 +132,27 @@ fabric-cicd polls the staging endpoint until it completes.
 
 ## Move to the DEP private workspace
 
-`pypi.org` is unreachable from a DEP workspace, so wheels must travel inside
-the Environment item:
+`pypi.org` is unreachable from inside a DEP-protected workspace, so the
+Fabric Environment publish cannot resolve any `pip:` deps itself. The
+pipeline solves this **automatically**:
 
-```bash
-# On a machine WITH internet:
-pip download \
-  --dest workspace/16_presidio/Presidio.Environment/Libraries/CustomLibraries \
-  --only-binary=:all: \
-  --python-version 3.11 \
-  --platform manylinux2014_x86_64 \
-  presidio-analyzer==2.2.355 presidio-anonymizer==2.2.355 spacy==3.7.5
+1. The `Vendor Presidio wheels` step in `azure-pipelines.yml` runs
+   `pip download -r requirements-presidio.txt` on the self-hosted agent
+   (which still has internet to pypi.org) and drops the resulting `.whl`
+   files into
+   `workspace/16_presidio/Presidio.Environment/Libraries/CustomLibraries/`.
+2. `Libraries/environment.yml` is conda-only (`python=3.11`, `pip`) — no
+   `pip:` block — so Fabric never tries to call out to pypi.org during
+   publish.
+3. fabric-cicd uploads the wheels along with the rest of the Environment
+   definition; Fabric installs them from the local `CustomLibraries/`.
 
-curl -L -o workspace/16_presidio/Presidio.Environment/Libraries/CustomLibraries/en_core_web_lg-3.7.1-py3-none-any.whl \
-  https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.7.1/en_core_web_lg-3.7.1-py3-none-any.whl
-```
+Wheels are produced fresh per pipeline run and excluded from git via
+`.gitignore`. To bump versions, edit `requirements-presidio.txt` and push.
 
-Then **remove the `pip:` block from `Libraries/environment.yml`** so Fabric
-doesn't try to reach pypi.org during publish, point `FABRIC_WORKSPACE_ID` at
-the private workspace's GUID, and re-run the pipeline.
+If the agent itself has no internet to pypi.org either, mirror the wheels
+to an internal Artifact Feed and add `--index-url` to the vendor step (or
+commit the wheels and skip the step entirely).
 
 ## Deploy to a workspace reachable only via Private Link
 
