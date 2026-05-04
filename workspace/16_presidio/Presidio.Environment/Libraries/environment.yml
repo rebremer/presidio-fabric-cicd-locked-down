@@ -1,7 +1,7 @@
-# Conda-side deps only. PyPI deps are vendored as wheels into
-# Libraries/CustomLibraries/ at pipeline build time -- see
-# requirements-presidio.txt and the "Vendor Presidio wheels" step in
-# azure-pipelines.yml. The DEP workspace cannot reach pypi.org during publish.
-dependencies:
-  - python=3.11
-  - pip
+# Empty public-libraries section. Python 3.11 + pip are already part of the
+# Fabric runtime 1.3 base image, so listing them as conda deps just forces
+# the library builder to call out to its conda channel mirror -- which is
+# blocked in a DEP-protected workspace and makes the publish hang/fail.
+# All real deps are shipped as wheels in Libraries/CustomLibraries/ via the
+# pipeline's "Vendor Presidio wheels" step (see requirements-presidio.txt).
+dependencies: []
