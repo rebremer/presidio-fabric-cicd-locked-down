@@ -67,7 +67,7 @@ def main() -> None:
     # do not touch unrelated items if scope is widened later).
     unpublish_all_orphan_items(
         target_workspace,
-        item_name_exclude_regex=r"^(?!Presidio$|PresidioSmokeTest$).*",
+        item_name_exclude_regex=r"^(?!PresidioPriv$|PresidioSmokeTest$).*",
     )
 
 
