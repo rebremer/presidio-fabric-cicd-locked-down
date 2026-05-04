@@ -17,7 +17,7 @@
 # # Presidio smoke test
 #
 # Verifies that the **Presidio** Fabric environment loads `presidio-analyzer`,
-# `presidio-anonymizer` and the spaCy `en_core_web_lg` model, and that the
+# `presidio-anonymizer` and the spaCy `en_core_web_sm` model, and that the
 # analyzer + anonymizer pipeline returns the expected entities on a sample
 # string.
 
@@ -41,6 +41,7 @@ print("spacy              :", spacy.__version__)
 # CELL ********************
 
 from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_anonymizer import AnonymizerEngine
 
 text = (
@@ -49,7 +50,13 @@ text = (
     "My SSN is 123-45-6789."
 )
 
-analyzer = AnalyzerEngine()
+# Default Presidio config asks for `en_core_web_lg`; we ship `_sm` instead.
+nlp_engine = NlpEngineProvider(nlp_configuration={
+    "nlp_engine_name": "spacy",
+    "models": [{"lang_code": "en", "model_name": "en_core_web_sm"}],
+}).create_engine()
+
+analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
 results = analyzer.analyze(text=text, language="en")
 
 for r in results:
