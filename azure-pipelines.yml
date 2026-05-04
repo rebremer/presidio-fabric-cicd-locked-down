@@ -24,6 +24,16 @@ trigger:
 
 pr: none
 
+# Runtime parameter to skip the wheel vendoring step. Use this to publish an
+# empty (conda-only) Environment for diagnostics: it confirms whether the DEP
+# workspace can publish at all, isolating network/identity issues from
+# package-content issues.
+parameters:
+  - name: vendorWheels
+    displayName: Vendor Presidio wheels into CustomLibraries/
+    type: boolean
+    default: true
+
 pool:
   name: Default
 
@@ -56,22 +66,32 @@ stages:
           # has internet) into the Environment's CustomLibraries/ folder.
           # fabric-cicd then uploads them to the DEP workspace where
           # pypi.org is unreachable during environment publish.
-          - powershell: |
-              $ErrorActionPreference = 'Stop'
-              $dest = 'workspace/16_presidio/Presidio.Environment/Libraries/CustomLibraries'
-              New-Item -ItemType Directory -Force -Path $dest | Out-Null
-              Get-ChildItem -Path $dest -Include *.whl,*.tar.gz -File -Recurse | Remove-Item -Force
-              python -m pip download -r requirements-presidio.txt `
-                --dest $dest `
-                --only-binary=:all: `
-                --python-version 3.11 `
-                --platform manylinux2014_x86_64 `
-                --implementation cp `
-                --abi cp311
-              if ($LASTEXITCODE -ne 0) { throw "pip download failed" }
-              Write-Host "Vendored wheels:"
-              Get-ChildItem $dest | Format-Table Name, Length
-            displayName: Vendor Presidio wheels
+          # Skip via the `vendorWheels` runtime parameter to publish an
+          # empty environment for diagnostics.
+          - ${{ if eq(parameters.vendorWheels, true) }}:
+            - powershell: |
+                $ErrorActionPreference = 'Stop'
+                $dest = 'workspace/16_presidio/Presidio.Environment/Libraries/CustomLibraries'
+                New-Item -ItemType Directory -Force -Path $dest | Out-Null
+                Get-ChildItem -Path $dest -Include *.whl,*.tar.gz -File -Recurse | Remove-Item -Force
+                python -m pip download -r requirements-presidio.txt `
+                  --dest $dest `
+                  --only-binary=:all: `
+                  --python-version 3.11 `
+                  --platform manylinux2014_x86_64 `
+                  --implementation cp `
+                  --abi cp311
+                if ($LASTEXITCODE -ne 0) { throw "pip download failed" }
+                Write-Host "Vendored wheels:"
+                Get-ChildItem $dest | Format-Table Name, Length
+              displayName: Vendor Presidio wheels
+
+          - ${{ if eq(parameters.vendorWheels, false) }}:
+            - powershell: |
+                $dest = 'workspace/16_presidio/Presidio.Environment/Libraries/CustomLibraries'
+                Get-ChildItem -Path $dest -Include *.whl,*.tar.gz -File -Recurse -ErrorAction SilentlyContinue | Remove-Item -Force
+                Write-Host "Skipped wheel vendoring -- publishing empty environment for diagnostics."
+              displayName: Skip vendoring (diagnostic empty publish)
 
           # Authenticate to Azure using the service connection, then export
           # the resulting access token as AZURE_* env vars so that
