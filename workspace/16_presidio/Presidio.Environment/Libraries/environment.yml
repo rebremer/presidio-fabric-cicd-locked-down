@@ -1,0 +1,15 @@
+# All public-PyPI dependencies for the Presidio Fabric environment.
+# In Fabric, only `environment.yml` is honored as a "public libraries" source
+# in the Environment item definition. A separate `requirements.txt` is NOT
+# picked up by the publish API, so list every PyPI package here.
+#
+# In the DEP-protected workspace, remove the `pip:` block and ship wheels
+# via `CustomLibraries/` instead -- see README.md.
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - presidio-analyzer==2.2.355
+      - presidio-anonymizer==2.2.355
+      - spacy==3.7.5
+      - https://github.com/explosion/spacy-models/releases/download/en_core_web_lg-3.7.1/en_core_web_lg-3.7.1-py3-none-any.whl

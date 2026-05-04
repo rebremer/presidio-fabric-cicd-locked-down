@@ -1,0 +1,6 @@
+# fabric-cicd parameter file (https://microsoft.github.io/fabric-cicd/1.0.0/how_to/parameterization/)
+# Add find_replace / spark_pool entries here when needed.
+find_replace:
+  - find_value: __placeholder__
+    replace_value:
+      PPE: __placeholder__

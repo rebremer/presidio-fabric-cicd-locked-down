@@ -1,0 +1,73 @@
+# Azure DevOps pipeline: deploy the Presidio Fabric environment + smoke-test
+# notebook into the target workspace using fabric-cicd.
+#
+# Prereqs (one-time, in the ADO project):
+#   1. Create an ARM service connection (workload identity / SPN) with
+#      access to the Fabric workspace. Save its name.
+#   2. Add pipeline variables:
+#        AZURE_SERVICE_CONNECTION = <service-connection-name>
+#        FABRIC_WORKSPACE_ID      = <workspace GUID>      (e.g. testpub)
+#        FABRIC_ENVIRONMENT       = PPE                   (or PROD)
+#   3. Make sure the self-hosted agent pool 'test-privenv-fabric' has
+#      line-of-sight to the (DEP-protected) Fabric workspace.
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - workspace/**
+      - deploy.py
+      - requirements-deploy.txt
+      - azure-pipelines.yml
+
+pr: none
+
+pool:
+  name: test-privenv-fabric
+
+variables:
+  - name: pythonVersion
+    value: "3.11"
+
+stages:
+  - stage: Deploy
+    displayName: Publish to Fabric
+    jobs:
+      - job: publish
+        displayName: fabric-cicd publish
+        timeoutInMinutes: 60
+        steps:
+          - checkout: self
+            displayName: Checkout sources
+
+          - task: UsePythonVersion@0
+            displayName: Use Python $(pythonVersion)
+            inputs:
+              versionSpec: "$(pythonVersion)"
+              addToPath: true
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r requirements-deploy.txt
+            displayName: Install fabric-cicd
+
+          # Authenticate to Azure using the service connection, then export
+          # the resulting access token as AZURE_* env vars so that
+          # DefaultAzureCredential picks them up inside deploy.py.
+          - task: AzureCLI@2
+            displayName: Run fabric-cicd deploy
+            env:
+              FABRIC_WORKSPACE_ID: $(FABRIC_WORKSPACE_ID)
+              FABRIC_ENVIRONMENT: $(FABRIC_ENVIRONMENT)
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: pscore
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              inlineScript: |
+                $env:AZURE_TENANT_ID   = $env:tenantId
+                $env:AZURE_CLIENT_ID   = $env:servicePrincipalId
+                $env:AZURE_CLIENT_SECRET = $env:servicePrincipalKey
+                python deploy.py
