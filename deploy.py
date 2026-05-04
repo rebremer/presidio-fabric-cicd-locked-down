@@ -35,6 +35,9 @@ from fabric_cicd import (
 def main() -> None:
     workspace_id = os.environ["FABRIC_WORKSPACE_ID"]
     environment = os.environ.get("FABRIC_ENVIRONMENT", "PPE")
+    # Override the API endpoint when the workspace blocks public inbound
+    # traffic (DEP / Private Link). Defaults to the public Power BI URL.
+    base_api_url = os.environ.get("FABRIC_BASE_API_URL", "https://api.fabric.microsoft.com/")
 
     # Point fabric-cicd at the workspace folder that contains the
     # source-controlled Fabric items. Folder layout mirrors what the
@@ -52,6 +55,7 @@ def main() -> None:
         repository_directory=repository_directory,
         item_type_in_scope=item_type_in_scope,
         token_credential=DefaultAzureCredential(),
+        base_api_url=base_api_url,
     )
 
     publish_all_items(target_workspace)
