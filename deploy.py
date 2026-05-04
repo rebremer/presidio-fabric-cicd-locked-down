@@ -37,10 +37,11 @@ def main() -> None:
     workspace_id = os.environ["FABRIC_WORKSPACE_ID"]
     environment = os.environ.get("FABRIC_ENVIRONMENT", "PPE")
     # Override the API endpoint when the workspace blocks public inbound
-    # traffic (DEP / Private Link). Defaults to the public Power BI URL.
-    base_api_url = os.environ.get("FABRIC_BASE_API_URL")
-    if base_api_url:
-        fabric_constants.DEFAULT_API_ROOT_URL = base_api_url
+    # traffic (DEP / Private Link). fabric-cicd 1.0 still defaults to the
+    # legacy https://api.powerbi.com endpoint, which is rejected by DEP
+    # workspaces; force the Fabric endpoint by default.
+    base_api_url = os.environ.get("FABRIC_BASE_API_URL", "https://api.fabric.microsoft.com")
+    fabric_constants.DEFAULT_API_ROOT_URL = base_api_url
 
     # Point fabric-cicd at the workspace folder that contains the
     # source-controlled Fabric items. Folder layout mirrors what the
