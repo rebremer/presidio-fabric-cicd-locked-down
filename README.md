@@ -187,6 +187,38 @@ the Fabric runtime. Recommendations:
 - If a clash surfaces at runtime, pin the conflicting package down to
   whatever the Fabric runtime ships and re-publish.
 
+## Runtime caveats in a fully locked-down workspace
+
+### `tldextract` / `publicsuffix.org`
+
+Presidio's `UrlRecognizer` uses `tldextract`, which on first call refreshes
+the public-suffix list from `https://publicsuffix.org/list/public_suffix_list.dat`.
+DEP outbound blocks that and `tldextract` raises `ConnectionError` instead
+of falling back to its bundled snapshot. The smoke notebook patches
+`tldextract.suffix_list.find_first_response` to raise `SuffixListNotFound`,
+which triggers the snapshot path.
+
+If you want the live suffix list instead, **whitelist
+`publicsuffix.org` in the workspace's outbound access policy**. We don't
+do that here on purpose — the goal is a fully locked-down environment.
+
+### spaCy model: `en_core_web_sm` vs `en_core_web_lg`
+
+The pipeline ships the **small** model (`en_core_web_sm`, ~13 MB) as a
+wheel into `CustomLibraries/`. The large model (`en_core_web_lg`, ~560 MB)
+exceeds Fabric's `updateDefinition` payload limit and cannot go through
+fabric-cicd as a wheel.
+
+If you need `_lg` (better PERSON/ORG accuracy), the workaround is:
+
+1. Upload the `.whl` (or extracted model dir) to a **OneLake** path in the
+   workspace, e.g. `Files/models/en_core_web_lg-3.7.1-py3-none-any.whl`.
+2. In your notebook, copy it to local disk and `pip install` it at
+   runtime, then point the `NlpEngineProvider` at `en_core_web_lg`.
+
+OneLake traffic stays inside the WSPL boundary, so this works without
+opening any outbound exceptions.
+
 ## How this compares to the MS docs pattern
 
 [Outbound access protection for Fabric Environments](https://learn.microsoft.com/fabric/data-engineering/environment-manage-library-with-outbound-access-protection)
