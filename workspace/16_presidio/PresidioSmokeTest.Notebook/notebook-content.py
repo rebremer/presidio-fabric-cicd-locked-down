@@ -58,12 +58,15 @@ nlp_engine = NlpEngineProvider(nlp_configuration={
 
 analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
 
-# UrlRecognizer pulls the public suffix list from publicsuffix.org via
-# tldextract on first use, which DEP outbound blocks. We don't need URL
-# detection for this smoke test, so remove it.
-analyzer.registry.remove_recognizer("UrlRecognizer")
-
-results = analyzer.analyze(text=text, language="en")
+# Restrict to the entities we actually need for this smoke test. The default
+# entity set includes URL detection, which uses tldextract and tries to
+# refresh the public-suffix list from publicsuffix.org -- DEP outbound
+# blocks this, so we explicitly skip it.
+results = analyzer.analyze(
+    text=text,
+    language="en",
+    entities=["EMAIL_ADDRESS", "PHONE_NUMBER", "PERSON", "US_SSN"],
+)
 
 for r in results:
     print(f"{r.entity_type:15s} score={r.score:.2f}  '{text[r.start:r.end]}'")
