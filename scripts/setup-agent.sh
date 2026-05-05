@@ -4,10 +4,8 @@
 #
 # Run on the agent VM (e.g. `test-fabricjumphost-linux-vm`) as a sudoer:
 #
-#   curl -sSL https://raw.githubusercontent.com/rebremer/test-presidio-cicd-privenv/main/scripts/setup-agent.sh | \
-#     ORG_URL=https://dev.azure.com/renebremer PAT=<pat> bash
-#
-# Or clone the repo and run:
+#   git clone https://dev.azure.com/renebremer/test-presidio-cicd-privenv/_git/test-presidio-cicd-privenv
+#   cd test-presidio-cicd-privenv
 #   ORG_URL=https://dev.azure.com/renebremer PAT=<pat> ./scripts/setup-agent.sh
 #
 # The script installs:

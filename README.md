@@ -94,7 +94,7 @@ zone link). On that VM:
 ```bash
 # Create a PAT with scope "Agent Pools (Read & manage)" at:
 #   https://dev.azure.com/<org>/_usersSettings/tokens
-git clone https://github.com/rebremer/test-presidio-cicd-privenv.git
+git clone https://dev.azure.com/renebremer/test-presidio-cicd-privenv/_git/test-presidio-cicd-privenv
 cd test-presidio-cicd-privenv
 ORG_URL=https://dev.azure.com/renebremer PAT=<pat> ./scripts/setup-agent.sh
 ```
