@@ -143,35 +143,20 @@ stages:
                 export TOKEN BASE SMOKE_NOTEBOOK_NAME
 
                 echo "==> Resolving notebook id for '${SMOKE_NOTEBOOK_NAME}'"
-                # Paginate through /notebooks and search by displayName. If
-                # the notebook is missing (e.g. publish was skipped or item
-                # was deleted) we list everything we did find to make the
-                # failure obvious.
-                NB_ID=$(curl -sS -H "Authorization: Bearer $TOKEN" "${BASE}/notebooks" \
-                    | python3 - <<'PY'
-                import json, os, sys, urllib.request
-                name = os.environ["SMOKE_NOTEBOOK_NAME"]
-                base = os.environ["BASE"]
-                token = os.environ["TOKEN"]
-                seen = []
-                page = json.load(sys.stdin)
-                while True:
-                    for i in page.get("value", []):
-                        seen.append(i["displayName"])
-                        if i["displayName"] == name:
-                            print(i["id"])
-                            sys.exit(0)
-                    nxt = page.get("continuationUri") or page.get("continuationToken")
-                    if not nxt:
-                        break
-                    if not nxt.startswith("http"):
-                        nxt = f"{base}/notebooks?continuationToken={nxt}"
-                    req = urllib.request.Request(nxt, headers={"Authorization": f"Bearer {token}"})
-                    page = json.loads(urllib.request.urlopen(req).read())
-                sys.stderr.write(f"Notebook '{name}' not found. Notebooks present: {seen}\n")
-                sys.exit(2)
-                PY
-                )
+                # Single-page lookup is sufficient: the workspace only ever
+                # contains items deployed by this repo. If the notebook is
+                # missing (e.g. publish was skipped after a manual delete)
+                # we surface a clear remediation message.
+                NB_LIST=$(curl -sS -H "Authorization: Bearer $TOKEN" "${BASE}/notebooks")
+                NB_ID=$(echo "$NB_LIST" | python3 -c "import json,sys,os; n=os.environ['SMOKE_NOTEBOOK_NAME']; print(next((i['id'] for i in json.load(sys.stdin).get('value',[]) if i['displayName']==n), ''))")
+                if [ -z "${NB_ID}" ]; then
+                    echo "ERROR: notebook '${SMOKE_NOTEBOOK_NAME}' not found in workspace ${FABRIC_WORKSPACE_ID}."
+                    echo "       Notebooks present:"
+                    echo "$NB_LIST" | python3 -c "import json,sys; [print('         -', i['displayName']) for i in json.load(sys.stdin).get('value',[])]"
+                    echo "       Re-run pipeline with 'Skip env+notebook publish' UNCHECKED to (re)create it."
+                    exit 1
+                fi
+                echo "    notebook id: ${NB_ID}"
                 if [ -z "${NB_ID}" ]; then
                     echo "ERROR: notebook '${SMOKE_NOTEBOOK_NAME}' not found in workspace ${FABRIC_WORKSPACE_ID}."
                     echo "       Re-run pipeline with 'Skip env+notebook publish' UNCHECKED to (re)create it."
