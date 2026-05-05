@@ -76,18 +76,24 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
     Force the notebook's environment binding by round-tripping the
     notebook definition in **ipynb** format.
 
-    Background: Fabric's REST `updateDefinition` silently strips the
-    `# META "dependencies": { "environment": {...} }` block when the
-    payload is `fabricGitSource` (the .py-with-#META source-control
-    format that fabric-cicd publishes). The `ipynb` format does NOT
-    have that bug -- `notebookutils.notebook.updateDefinition` itself
-    relies on it to update env / lakehouse bindings.
+    Why: when fabric-cicd publishes a notebook it uses the
+    `fabricGitSource` format (the .py-with-`# META`-headers source-
+    control format). On that format Fabric's REST `updateDefinition`
+    silently strips the `"dependencies": { "environment": {...} }`
+    block, so the notebook ends up unbound (= using Workspace default).
+    The `ipynb` format does not have that bug -- it is the same code
+    path `notebookutils.notebook.updateDefinition` uses to update env
+    and default-lakehouse bindings from inside a running notebook.
 
     Workflow:
-      1. GET current definition with ?format=ipynb
-      2. Mutate metadata.dependencies.environment with the resolved
-         workspace + env GUIDs
-      3. POST it back with ?format=ipynb
+      1. GET current definition with `?format=ipynb`
+         (the URL param tells Fabric to return the .ipynb part).
+      2. Mutate `metadata.dependencies.environment` with the resolved
+         workspace + env GUIDs.
+      3. POST it back with `"format": "ipynb"` inside the body and
+         the `.ipynb` part path. Do NOT put `?format=ipynb` on the
+         update URL -- on `updateDefinition` the URL param means
+         "convert .py -> .ipynb" and rejects the request.
 
     No live Spark session needed -- this is a pure metadata update on
     the notebook artifact.
@@ -155,18 +161,15 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
     print(f"  set metadata.dependencies.environment = {deps['environment']}")
 
     new_bytes = json.dumps(nb_json, indent=2).encode("utf-8")
-    # Mirror getDefinition: keep .ipynb path AND set format=ipynb in
-    # the body. The earlier ?format=ipynb URL param tells Fabric to
-    # *convert* py->ipynb and rejects either suffix; specifying format
-    # inside the definition body is the correct shape (same way
-    # fabricGitSource is declared).
     new_part = {
         "path": ipynb_path,
         "payload": base64.b64encode(new_bytes).decode("ascii"),
         "payloadType": "InlineBase64",
     }
 
-    # 3. POST it back as ipynb (no ?format query, format inside body).
+    # 3. POST it back. Format goes inside the body (same shape as
+    # fabricGitSource); ?format=ipynb on the URL would trigger Fabric's
+    # py->ipynb converter and reject the request.
     put_url = (
         f"{fabric_workspace_obj.base_api_url}/notebooks/{nb.guid}"
         f"/updateDefinition"
@@ -210,37 +213,6 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
         raise RuntimeError("Verification failed: no .ipynb part returned")
 
 
-def _cancel_running_notebook_jobs(fabric_workspace_obj, notebook_guid: str) -> None:
-    """
-    List job instances for the notebook and cancel any in non-terminal
-    state. Fabric pins notebook definition while a Spark session is
-    active, so updateDefinition silently no-ops until the session ends.
-    """
-    list_url = f"{fabric_workspace_obj.base_api_url}/items/{notebook_guid}/jobs/instances"
-    try:
-        resp = fabric_workspace_obj.endpoint.invoke(method="GET", url=list_url)
-    except Exception as exc:
-        print(f"  WARN: could not list notebook jobs: {exc!r}")
-        return
-    body = resp.get("body", {}) if isinstance(resp, dict) else {}
-    instances = body.get("value", [])
-    active = [i for i in instances if i.get("status") in ("InProgress", "NotStarted")]
-    if not active:
-        print("  no active notebook jobs to cancel")
-        return
-    print(f"  cancelling {len(active)} active notebook job(s)")
-    for inst in active:
-        inst_id = inst.get("id")
-        cancel_url = f"{fabric_workspace_obj.base_api_url}/items/{notebook_guid}/jobs/instances/{inst_id}/cancel"
-        try:
-            fabric_workspace_obj.endpoint.invoke(method="POST", url=cancel_url, body={})
-            print(f"    cancelled {inst_id}")
-        except Exception as exc:
-            print(f"    WARN: could not cancel {inst_id}: {exc!r}")
-    # Brief settle so the cancel takes effect before we updateDefinition.
-    time.sleep(15)
-
-
 def _lookup_environment_guid(fabric_workspace_obj, env_name: str) -> str | None:
     """List workspace environments and return the GUID matching env_name."""
     url = f"{fabric_workspace_obj.base_api_url}/environments"
@@ -255,8 +227,8 @@ def _lookup_environment_guid(fabric_workspace_obj, env_name: str) -> str | None:
 def _wait_for_env_publish(fabric_workspace_obj, env_guid: str, timeout_s: int = 1200) -> None:
     """
     Poll /environments/{id} until publishDetails.state is terminal.
-    Fabric silently strips notebook->env bindings while a publish is
-    Running, so we must block here before re-binding the notebook.
+    Fabric rejects notebook->env binding while a publish is Running,
+    so block here before calling updateDefinition.
     """
     url = f"{fabric_workspace_obj.base_api_url}/environments/{env_guid}"
     deadline = time.monotonic() + timeout_s
@@ -320,13 +292,11 @@ def main() -> None:
 
     publish_all_items(target_workspace)
 
-    # Force the notebook's environment binding via the notebook-specific
-    # REST endpoint. fabric-cicd publishes notebooks via the generic
-    # /items endpoint which appears to drop the `# META "dependencies"`
-    # block from notebook-content.py, leaving the notebook attached to
-    # the workspace's default (i.e. no) environment. Re-POST the same
-    # definition through the notebook-specific updateDefinition endpoint
-    # which preserves it.
+    # Re-bind the smoke-test notebook to PresidioPriv via an ipynb-
+    # format round-trip. fabric-cicd publishes notebooks in
+    # `fabricGitSource` format, on which Fabric's updateDefinition
+    # silently strips the dependencies->environment block; the ipynb
+    # format preserves it. See _force_notebook_env_binding for details.
     _force_notebook_env_binding(target_workspace, "PresidioSmokeTest")
 
     # Only unpublish items that we own (safety guard:

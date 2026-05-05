@@ -46,21 +46,32 @@ driven from **Azure DevOps** through a self-hosted Linux agent.
    │     │           │                          deploy.py before publish)│
    │     │           └── CustomLibraries/      (53 wheels uploaded by   │
    │     │                                      fabric-cicd)            │
-   │     └── PresidioSmokeTest.Notebook        (attached to env above)  │
+   │     └── PresidioSmokeTest.Notebook        (rebound to env above    │
+   │                                            via ipynb-format        │
+   │                                            updateDefinition by     │
+   │                                            deploy.py post-publish) │
    └────────────────────────────────────────────────────────────────────┘
 ```
 
-## The key insight: clear `environment.yml` before publish
+## Two workarounds in `deploy.py`
 
-In a WSPL/DEP workspace, pypi.org and conda-forge are unreachable from the
-Fabric publish backend. Any `environment.yml` with public dependencies
-(including the seemingly innocent `python=3.11` and `pip` defaults that
-fabric-cicd adds) makes the publish fail silently with
-`sparkLibraries.state: "Failed"` — Fabric's API exposes no error message.
+fabric-cicd 1.0 publishes Environment items and Notebook items, but in a
+WSPL/DEP workspace it hits two distinct backend bugs. `deploy.py` works
+around both with surgical REST calls; everything else stays vanilla
+fabric-cicd.
 
-Workspace storage (where `CustomLibraries/` lives) IS reachable via WSPL,
-so wheels uploaded there install fine — provided we stop Fabric from
-trying to resolve the public deps section at all.
+### 1. Clear `environment.yml` before publish
+
+In a WSPL/DEP workspace, pypi.org and conda-forge are unreachable from
+the Fabric publish backend. Any `environment.yml` with public
+dependencies (including the seemingly innocent `python=3.11` and `pip`
+defaults that fabric-cicd adds) makes the publish fail silently with
+`sparkLibraries.state: "Failed"` -- Fabric's API exposes no error
+message.
+
+Workspace storage (where `CustomLibraries/` lives) IS reachable via
+WSPL, so wheels uploaded there install fine -- provided we stop Fabric
+from trying to resolve the public deps section at all.
 
 `deploy.py` monkey-patches `fabric_cicd._items._environment` to call:
 
@@ -70,7 +81,7 @@ DELETE /v1/workspaces/{wsid}/environments/{eid}/staging/libraries?libraryToDelet
 
 right after fabric-cicd uploads the definition and right before it
 triggers publish. Net effect: staging ends up with `environmentYml: ""`
-plus the wheels — the same state a manually-created working env shows.
+plus the wheels -- the same state a manually-created working env shows.
 
 Verify after a run from inside the VNet:
 
@@ -80,6 +91,47 @@ az rest --method get --resource https://api.fabric.microsoft.com \
 # Expect:
 # { "customLibraries": { "wheelFiles": [...] }, "environmentYml": "" }
 ```
+
+### 2. Re-bind the notebook to its environment via the `ipynb` format
+
+The notebook source under `workspace/.../PresidioSmokeTest.Notebook/`
+uses Fabric's source-control format -- `notebook-content.py` with
+`# META` headers including a `dependencies.environment` block that
+points at the `PresidioPriv` environment. fabric-cicd publishes that
+file through the standard `notebooks/{id}/updateDefinition` endpoint
+in `fabricGitSource` format.
+
+**Bug:** on `fabricGitSource` payloads, Fabric **silently strips the
+entire `dependencies.environment` block** from the saved definition.
+The POST returns 200 OK; reading the notebook back shows no binding;
+the portal shows "Workspace default". This happens regardless of
+whether the env publish has finished, whether the notebook has an
+active session, or whether the env GUID is correct.
+
+**Workaround:** after publish, `deploy.py` does an `ipynb`-format
+round-trip on the same endpoint, which does NOT have the strip bug
+(it's the same path `notebookutils.notebook.updateDefinition` uses
+internally to update env / default-lakehouse bindings):
+
+1. `POST .../notebooks/{id}/getDefinition?format=ipynb` to fetch the
+   notebook as a `.ipynb` JSON.
+2. Set `metadata.dependencies.environment = { environmentId,
+   workspaceId }` to the resolved GUIDs.
+3. `POST .../notebooks/{id}/updateDefinition` with `"format": "ipynb"`
+   inside the body (do NOT use `?format=ipynb` on the URL -- on
+   `updateDefinition` that means "convert .py to .ipynb" and is
+   rejected).
+4. Re-fetch and assert that `metadata.dependencies.environment` now
+   contains the expected `environmentId`. If not, fail the deploy.
+
+The env GUID is resolved at runtime by `displayName` lookup against
+`/v1/workspaces/{wsid}/environments`, so the source notebook can
+ship with any placeholder GUID; the deploy rewrites it to whatever
+the target workspace's `PresidioPriv` actually has.
+
+`deploy.py` also blocks until `publishDetails.state == Success` on the
+target environment before attempting the bind -- Fabric rejects the
+binding while the env publish is `Running`.
 
 ## Repo layout
 
@@ -172,9 +224,15 @@ Use the `…zfc.w.api.fabric.microsoft.com` record for `FABRIC_BASE_API_URL`.
 
 ## Run it
 
-`git push` to `main` → pipeline triggers automatically. The Environment
-publish is a long-running operation (~5–15 min for the full Presidio
-closure of 53 wheels); fabric-cicd polls until completion.
+`git push` to `main` triggers the pipeline. The Environment publish is
+a long-running operation (~5–15 min for the full Presidio closure of
+53 wheels); fabric-cicd polls until completion. The notebook re-bind
+is a fast metadata-only call (~5 s) that runs after the env publish
+settles.
+
+For fast iteration after the env is already published, run the
+pipeline with the `skipEnvPublish=true` parameter -- it skips the
+10-minute env publish and only republishes the notebook + re-binds it.
 
 ## Conflict mitigation
 
