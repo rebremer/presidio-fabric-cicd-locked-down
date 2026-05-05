@@ -31,7 +31,7 @@ AGENT_NAME="${AGENT_NAME:-$(hostname)}"
 WORK_DIR="${WORK_DIR:-$HOME/agent}"
 AGENT_VER="${AGENT_VER:-3.243.1}"
 
-AGENT_URL="https://vstsagentpackage.azureedge.net/agent/${AGENT_VER}/vsts-agent-linux-x64-${AGENT_VER}.tar.gz"
+AGENT_URL="https://download.agent.dev.azure.com/agent/${AGENT_VER}/vsts-agent-linux-x64-${AGENT_VER}.tar.gz"
 
 echo "[1/4] apt prerequisites..."
 sudo apt-get update -y
