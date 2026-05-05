@@ -115,29 +115,33 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
     nb_dir = Path(nb.path)
     print(f"  source dir: {nb_dir}")
     parts = []
-    for fname in ("notebook-content.py", ".platform"):
-        fpath = nb_dir / fname
-        if not fpath.exists():
-            print(f"  WARN: {fpath} missing; skipping")
-            continue
-        raw = fpath.read_bytes()
-        if fname == "notebook-content.py":
-            txt = raw.decode("utf-8")
-            txt = _rewrite_env_binding(txt, env_guid, workspace_guid)
-            raw = txt.encode("utf-8")
-            has_dep = '"dependencies"' in txt and '"environment"' in txt
-            print(f"  rewrote env binding in {fname} ({len(raw)} bytes); dep block present: {has_dep}")
-            print("  ----- outgoing notebook-content.py header (first 14 lines) -----")
-            print("\n".join(txt.splitlines()[:14]))
-            print("  ---------------------------------------------------------------")
-        else:
-            print(f"  including {fname} ({len(raw)} bytes)")
-        payload_b64 = base64.b64encode(raw).decode("ascii")
-        parts.append({"path": fname, "payload": payload_b64, "payloadType": "InlineBase64"})
+    # Only re-POST notebook-content.py (which carries the dependencies
+    # block in its `# META` header). Including .platform with
+    # updateMetadata=True caused Fabric to overwrite the env binding
+    # because .platform has no dependencies field.
+    fname = "notebook-content.py"
+    fpath = nb_dir / fname
+    if not fpath.exists():
+        print(f"  WARN: {fpath} missing; cannot force-bind")
+        return
+    raw = fpath.read_bytes()
+    txt = raw.decode("utf-8")
+    txt = _rewrite_env_binding(txt, env_guid, workspace_guid)
+    raw = txt.encode("utf-8")
+    has_dep = '"dependencies"' in txt and '"environment"' in txt
+    print(f"  rewrote env binding in {fname} ({len(raw)} bytes); dep block present: {has_dep}")
+    print("  ----- outgoing notebook-content.py header (first 14 lines) -----")
+    print("\n".join(txt.splitlines()[:14]))
+    print("  ---------------------------------------------------------------")
+    parts.append({
+        "path": fname,
+        "payload": base64.b64encode(raw).decode("ascii"),
+        "payloadType": "InlineBase64",
+    })
 
     url = (
         f"{fabric_workspace_obj.base_api_url}/notebooks/{nb.guid}"
-        f"/updateDefinition?updateMetadata=True"
+        f"/updateDefinition"
     )
     body = {"definition": {"format": "fabricGitSource", "parts": parts}}
     print(f"  POST {url}")
