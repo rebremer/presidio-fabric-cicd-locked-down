@@ -37,8 +37,8 @@ trigger:
 pr: none
 
 parameters:
-  - name: skipPublish
-    displayName: Skip env+notebook publish (only run smoke test)
+  - name: skipEnvPublish
+    displayName: Skip environment publish (notebook-only redeploy + smoke test)
     type: boolean
     default: false
 
@@ -75,7 +75,7 @@ stages:
               python3 -m pip install --user -r requirements-deploy.txt
             displayName: Install fabric-cicd
 
-          - ${{ if eq(parameters.skipPublish, false) }}:
+          - ${{ if eq(parameters.skipEnvPublish, false) }}:
             - bash: |
                 set -euo pipefail
                 echo "==> Pre-clean ${CUSTOM_LIBS_DIR}"
@@ -105,25 +105,31 @@ stages:
                 CUSTOM_LIBS_DIR: $(customLibsDir)
               displayName: Vendor Presidio wheels (Linux py3.11 manylinux)
 
-            - task: AzureCLI@2
-              displayName: Run fabric-cicd deploy
-              env:
-                FABRIC_WORKSPACE_ID: $(FABRIC_WORKSPACE_ID)
-                FABRIC_ENVIRONMENT: $(FABRIC_ENVIRONMENT)
-                FABRIC_BASE_API_URL: $(FABRIC_BASE_API_URL)
-              inputs:
-                azureSubscription: $(AZURE_SERVICE_CONNECTION)
-                scriptType: bash
-                scriptLocation: inlineScript
-                addSpnToEnvironment: true
-                inlineScript: |
-                  set -euo pipefail
-                  export AZURE_TENANT_ID="$tenantId"
-                  export AZURE_CLIENT_ID="$servicePrincipalId"
-                  # WIF: no client secret. AzureCLI@2 leaves an authenticated
-                  # az session; DefaultAzureCredential -> AzureCliCredential
-                  # will reuse it for fabric-cicd.
-                  python3 deploy.py
+          - task: AzureCLI@2
+            displayName: Run fabric-cicd deploy
+            env:
+              FABRIC_WORKSPACE_ID: $(FABRIC_WORKSPACE_ID)
+              FABRIC_ENVIRONMENT: $(FABRIC_ENVIRONMENT)
+              FABRIC_BASE_API_URL: $(FABRIC_BASE_API_URL)
+              # Notebook-only redeploy when env publish is skipped (saves
+              # ~10 min by not republishing 53 wheels to the env staging area).
+              ${{ if eq(parameters.skipEnvPublish, true) }}:
+                FABRIC_ITEM_TYPES: Notebook
+              ${{ if eq(parameters.skipEnvPublish, false) }}:
+                FABRIC_ITEM_TYPES: Environment,Notebook
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+                export AZURE_TENANT_ID="$tenantId"
+                export AZURE_CLIENT_ID="$servicePrincipalId"
+                # WIF: no client secret. AzureCLI@2 leaves an authenticated
+                # az session; DefaultAzureCredential -> AzureCliCredential
+                # will reuse it for fabric-cicd.
+                python3 deploy.py
 
           - task: AzureCLI@2
             displayName: Run smoke-test notebook

@@ -83,7 +83,14 @@ def main() -> None:
     # Fabric Source Control UI produces.
     repository_directory = str(Path(__file__).resolve().parent / "workspace")
 
-    item_type_in_scope = ["Environment", "Notebook"]
+    # Item scope is overridable via env so the pipeline can do a fast
+    # notebook-only redeploy (skipping the 10-minute environment publish).
+    item_type_in_scope = [
+        s.strip()
+        for s in os.environ.get("FABRIC_ITEM_TYPES", "Environment,Notebook").split(",")
+        if s.strip()
+    ]
+    print(f"Item types in scope: {item_type_in_scope}")
 
     if os.environ.get("FABRIC_DEBUG", "").lower() in ("1", "true", "yes"):
         change_log_level("DEBUG")
