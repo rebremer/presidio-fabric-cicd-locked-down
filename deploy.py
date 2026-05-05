@@ -79,19 +79,31 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
     block from notebook-content.py and leaves the notebook attached to
     the workspace's default environment.
     """
+    print(f"==> Force-binding notebook '{notebook_name}' to its declared environment")
     repo_items = fabric_workspace_obj.repository_items
     nb = repo_items.get(ItemType.NOTEBOOK.value, {}).get(notebook_name)
-    if nb is None or not nb.guid:
-        print(f"  Skipping env-binding force: notebook '{notebook_name}' not in repo or not deployed")
+    if nb is None:
+        print(f"  WARN: notebook '{notebook_name}' not in repository_items; skipping")
+        return
+    if not nb.guid:
+        print(f"  WARN: notebook '{notebook_name}' has no deployed guid; skipping")
         return
 
     nb_dir = Path(nb.path)
+    print(f"  source dir: {nb_dir}")
     parts = []
     for fname in ("notebook-content.py", ".platform"):
         fpath = nb_dir / fname
         if not fpath.exists():
+            print(f"  WARN: {fpath} missing; skipping")
             continue
-        payload_b64 = base64.b64encode(fpath.read_bytes()).decode("ascii")
+        raw = fpath.read_bytes()
+        print(f"  including {fname} ({len(raw)} bytes)")
+        if fname == "notebook-content.py":
+            txt = raw.decode("utf-8", errors="replace")
+            has_dep = '"dependencies"' in txt and '"environment"' in txt
+            print(f"    contains dependencies+environment block: {has_dep}")
+        payload_b64 = base64.b64encode(raw).decode("ascii")
         parts.append({"path": fname, "payload": payload_b64, "payloadType": "InlineBase64"})
 
     url = (
@@ -99,12 +111,14 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
         f"/updateDefinition?updateMetadata=True"
     )
     body = {"definition": {"parts": parts}}
-    print(f"  Forcing notebook env binding via {url}")
-    resp = fabric_workspace_obj.endpoint.invoke(method="POST", url=url, body=body)
-    # 202 = accepted, LRO; 200 = sync success
-    print(f"  updateDefinition response: status={resp.get('status_code', '?')}")
-    # Brief settle to let LRO complete (fabric-cicd's invoke usually polls,
-    # but we add a small grace period before any downstream smoke test).
+    print(f"  POST {url}")
+    try:
+        resp = fabric_workspace_obj.endpoint.invoke(method="POST", url=url, body=body)
+        print(f"  response keys: {list(resp.keys()) if isinstance(resp, dict) else type(resp)}")
+        print(f"  response: {resp}")
+    except Exception as exc:
+        print(f"  ERROR forcing notebook env binding: {exc!r}")
+        raise
     time.sleep(5)
 
 
