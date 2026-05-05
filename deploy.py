@@ -121,6 +121,9 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
             raw = txt.encode("utf-8")
             has_dep = '"dependencies"' in txt and '"environment"' in txt
             print(f"  rewrote env binding in {fname} ({len(raw)} bytes); dep block present: {has_dep}")
+            print("  ----- outgoing notebook-content.py header (first 14 lines) -----")
+            print("\n".join(txt.splitlines()[:14]))
+            print("  ---------------------------------------------------------------")
         else:
             print(f"  including {fname} ({len(raw)} bytes)")
         payload_b64 = base64.b64encode(raw).decode("ascii")
