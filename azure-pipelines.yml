@@ -36,6 +36,12 @@ trigger:
 
 pr: none
 
+parameters:
+  - name: skipPublish
+    displayName: Skip env+notebook publish (only run smoke test)
+    type: boolean
+    default: false
+
 pool:
   name: Default
   demands:
@@ -69,54 +75,55 @@ stages:
               python3 -m pip install --user -r requirements-deploy.txt
             displayName: Install fabric-cicd
 
-          - bash: |
-              set -euo pipefail
-              echo "==> Pre-clean ${CUSTOM_LIBS_DIR}"
-              mkdir -p "${CUSTOM_LIBS_DIR}"
-              find "${CUSTOM_LIBS_DIR}" -type f \( -name '*.whl' -o -name '*.tar.gz' \) -delete
-
-              echo "==> pip download Linux py3.11 wheels into ${CUSTOM_LIBS_DIR}"
-              # Resolve full transitive closure for Linux/cp311. fabric-cicd
-              # uploads everything in CustomLibraries/ to workspace storage,
-              # which IS reachable via WSPL. Duplicates of packages already in
-              # the Fabric runtime are harmless (runtime wins at import time).
-              python3 -m pip download \
-                  --dest "${CUSTOM_LIBS_DIR}" \
-                  --python-version 3.11 \
-                  --platform manylinux2014_x86_64 \
-                  --platform manylinux_2_17_x86_64 \
-                  --platform manylinux_2_28_x86_64 \
-                  --implementation cp \
-                  --abi cp311 \
-                  --only-binary=:all: \
-                  -r requirements-presidio.txt
-
-              echo "==> Vendored wheels:"
-              ls -la "${CUSTOM_LIBS_DIR}"
-              echo "Total: $(ls "${CUSTOM_LIBS_DIR}" | wc -l) files"
-            env:
-              CUSTOM_LIBS_DIR: $(customLibsDir)
-            displayName: Vendor Presidio wheels (Linux py3.11 manylinux)
-
-          - task: AzureCLI@2
-            displayName: Run fabric-cicd deploy
-            env:
-              FABRIC_WORKSPACE_ID: $(FABRIC_WORKSPACE_ID)
-              FABRIC_ENVIRONMENT: $(FABRIC_ENVIRONMENT)
-              FABRIC_BASE_API_URL: $(FABRIC_BASE_API_URL)
-            inputs:
-              azureSubscription: $(AZURE_SERVICE_CONNECTION)
-              scriptType: bash
-              scriptLocation: inlineScript
-              addSpnToEnvironment: true
-              inlineScript: |
+          - ${{ if eq(parameters.skipPublish, false) }}:
+            - bash: |
                 set -euo pipefail
-                export AZURE_TENANT_ID="$tenantId"
-                export AZURE_CLIENT_ID="$servicePrincipalId"
-                # WIF: no client secret. AzureCLI@2 leaves an authenticated
-                # az session; DefaultAzureCredential -> AzureCliCredential
-                # will reuse it for fabric-cicd.
-                python3 deploy.py
+                echo "==> Pre-clean ${CUSTOM_LIBS_DIR}"
+                mkdir -p "${CUSTOM_LIBS_DIR}"
+                find "${CUSTOM_LIBS_DIR}" -type f \( -name '*.whl' -o -name '*.tar.gz' \) -delete
+
+                echo "==> pip download Linux py3.11 wheels into ${CUSTOM_LIBS_DIR}"
+                # Resolve full transitive closure for Linux/cp311. fabric-cicd
+                # uploads everything in CustomLibraries/ to workspace storage,
+                # which IS reachable via WSPL. Duplicates of packages already
+                # in the Fabric runtime are harmless (runtime wins at import).
+                python3 -m pip download \
+                    --dest "${CUSTOM_LIBS_DIR}" \
+                    --python-version 3.11 \
+                    --platform manylinux2014_x86_64 \
+                    --platform manylinux_2_17_x86_64 \
+                    --platform manylinux_2_28_x86_64 \
+                    --implementation cp \
+                    --abi cp311 \
+                    --only-binary=:all: \
+                    -r requirements-presidio.txt
+
+                echo "==> Vendored wheels:"
+                ls -la "${CUSTOM_LIBS_DIR}"
+                echo "Total: $(ls "${CUSTOM_LIBS_DIR}" | wc -l) files"
+              env:
+                CUSTOM_LIBS_DIR: $(customLibsDir)
+              displayName: Vendor Presidio wheels (Linux py3.11 manylinux)
+
+            - task: AzureCLI@2
+              displayName: Run fabric-cicd deploy
+              env:
+                FABRIC_WORKSPACE_ID: $(FABRIC_WORKSPACE_ID)
+                FABRIC_ENVIRONMENT: $(FABRIC_ENVIRONMENT)
+                FABRIC_BASE_API_URL: $(FABRIC_BASE_API_URL)
+              inputs:
+                azureSubscription: $(AZURE_SERVICE_CONNECTION)
+                scriptType: bash
+                scriptLocation: inlineScript
+                addSpnToEnvironment: true
+                inlineScript: |
+                  set -euo pipefail
+                  export AZURE_TENANT_ID="$tenantId"
+                  export AZURE_CLIENT_ID="$servicePrincipalId"
+                  # WIF: no client secret. AzureCLI@2 leaves an authenticated
+                  # az session; DefaultAzureCredential -> AzureCliCredential
+                  # will reuse it for fabric-cicd.
+                  python3 deploy.py
 
           - task: AzureCLI@2
             displayName: Run smoke-test notebook
