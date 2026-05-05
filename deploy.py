@@ -78,6 +78,11 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
     which drops the `# META "dependencies": { "environment": {...} }`
     block from notebook-content.py and leaves the notebook attached to
     the workspace's default environment.
+
+    Also rewrites the dependencies block so the env GUID is whatever the
+    'PresidioPriv' env actually has in the target workspace right now,
+    because Fabric silently strips dependencies that point at a
+    non-existent environmentId.
     """
     print(f"==> Force-binding notebook '{notebook_name}' to its declared environment")
     repo_items = fabric_workspace_obj.repository_items
@@ -89,6 +94,18 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
         print(f"  WARN: notebook '{notebook_name}' has no deployed guid; skipping")
         return
 
+    env_item = repo_items.get(ItemType.ENVIRONMENT.value, {}).get("PresidioPriv")
+    if env_item is None or not env_item.guid:
+        # Notebook-only redeploy: env item isn't in scope. Look it up via REST.
+        env_guid = _lookup_environment_guid(fabric_workspace_obj, "PresidioPriv")
+    else:
+        env_guid = env_item.guid
+    if not env_guid:
+        print("  WARN: could not resolve PresidioPriv env guid; skipping force-bind")
+        return
+    workspace_guid = fabric_workspace_obj.workspace_id
+    print(f"  binding to environmentId={env_guid} workspaceId={workspace_guid}")
+
     nb_dir = Path(nb.path)
     print(f"  source dir: {nb_dir}")
     parts = []
@@ -98,11 +115,14 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
             print(f"  WARN: {fpath} missing; skipping")
             continue
         raw = fpath.read_bytes()
-        print(f"  including {fname} ({len(raw)} bytes)")
         if fname == "notebook-content.py":
-            txt = raw.decode("utf-8", errors="replace")
+            txt = raw.decode("utf-8")
+            txt = _rewrite_env_binding(txt, env_guid, workspace_guid)
+            raw = txt.encode("utf-8")
             has_dep = '"dependencies"' in txt and '"environment"' in txt
-            print(f"    contains dependencies+environment block: {has_dep}")
+            print(f"  rewrote env binding in {fname} ({len(raw)} bytes); dep block present: {has_dep}")
+        else:
+            print(f"  including {fname} ({len(raw)} bytes)")
         payload_b64 = base64.b64encode(raw).decode("ascii")
         parts.append({"path": fname, "payload": payload_b64, "payloadType": "InlineBase64"})
 
@@ -110,12 +130,11 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
         f"{fabric_workspace_obj.base_api_url}/notebooks/{nb.guid}"
         f"/updateDefinition?updateMetadata=True"
     )
-    body = {"definition": {"parts": parts}}
+    body = {"definition": {"format": "fabricGitSource", "parts": parts}}
     print(f"  POST {url}")
     try:
         resp = fabric_workspace_obj.endpoint.invoke(method="POST", url=url, body=body)
-        print(f"  response keys: {list(resp.keys()) if isinstance(resp, dict) else type(resp)}")
-        print(f"  response: {resp}")
+        print(f"  status_code: {resp.get('status_code', '?') if isinstance(resp, dict) else resp}")
     except Exception as exc:
         print(f"  ERROR forcing notebook env binding: {exc!r}")
         raise
@@ -138,8 +157,48 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
                 print("  ---------------------------------------------------------")
                 has_env = '"environmentId"' in content
                 print(f"  deployed notebook contains environmentId: {has_env}")
+                if not has_env:
+                    raise RuntimeError(
+                        "Fabric stripped the environment binding from the notebook "
+                        "definition on save. The referenced environmentId likely "
+                        "does not exist in the target workspace."
+                    )
     except Exception as exc:
-        print(f"  WARN: could not read back notebook definition: {exc!r}")
+        print(f"  ERROR verifying notebook env binding: {exc!r}")
+        raise
+
+
+def _lookup_environment_guid(fabric_workspace_obj, env_name: str) -> str | None:
+    """List workspace environments and return the GUID matching env_name."""
+    url = f"{fabric_workspace_obj.base_api_url}/environments"
+    resp = fabric_workspace_obj.endpoint.invoke(method="GET", url=url)
+    body = resp.get("body", {}) if isinstance(resp, dict) else {}
+    for env in body.get("value", []):
+        if env.get("displayName") == env_name:
+            return env.get("id")
+    return None
+
+
+def _rewrite_env_binding(content: str, env_guid: str, workspace_guid: str) -> str:
+    """
+    Replace any existing `# META "environmentId": "..."` and
+    `# META "workspaceId": "..."` lines in the notebook header with the
+    resolved guids. Assumes the source already has a dependencies block
+    (this repo's PresidioSmokeTest notebook does).
+    """
+    import re
+
+    content = re.sub(
+        r'(# META\s+"environmentId":\s*")[^"]*(")',
+        rf"\g<1>{env_guid}\g<2>",
+        content,
+    )
+    content = re.sub(
+        r'(# META\s+"workspaceId":\s*")[^"]*(")',
+        rf"\g<1>{workspace_guid}\g<2>",
+        content,
+    )
+    return content
 
 
 def main() -> None:
