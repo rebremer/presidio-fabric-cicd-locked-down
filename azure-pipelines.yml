@@ -45,6 +45,10 @@ parameters:
     displayName: Fabric runtime YML to mirror locally
     type: string
     default: Fabric-Python311-CPU.yml
+  - name: fabricRuntimeDir
+    displayName: Subfolder under microsoft/synapse-spark-runtime/Fabric/
+    type: string
+    default: Runtime 1.3 (Spark 3.5)
 
 pool:
   name: Default
@@ -91,7 +95,10 @@ stages:
                 source "$HOME/miniconda3/etc/profile.d/conda.sh"
 
                 RUNTIME_YML='${{ parameters.fabricRuntimeYml }}'
-                RUNTIME_URL="https://raw.githubusercontent.com/microsoft/synapse-spark-runtime/main/Fabric/${RUNTIME_YML}"
+                RUNTIME_DIR='${{ parameters.fabricRuntimeDir }}'
+                # URL-encode spaces and parentheses in the directory name
+                RUNTIME_DIR_ENC=$(printf '%s' "$RUNTIME_DIR" | sed 's/ /%20/g; s/(/%28/g; s/)/%29/g')
+                RUNTIME_URL="https://raw.githubusercontent.com/microsoft/synapse-spark-runtime/main/Fabric/${RUNTIME_DIR_ENC}/${RUNTIME_YML}"
 
                 echo "==> Fetching Fabric runtime YML: ${RUNTIME_URL}"
                 curl -fsSL "$RUNTIME_URL" -o "/tmp/${RUNTIME_YML}"
