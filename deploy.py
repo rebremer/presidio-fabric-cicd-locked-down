@@ -155,8 +155,12 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
     print(f"  set metadata.dependencies.environment = {deps['environment']}")
 
     new_bytes = json.dumps(nb_json, indent=2).encode("utf-8")
+    # Storage path must keep the .py suffix even when format=ipynb
+    # (Fabric's converter rejects .ipynb path with PyToIPynbFailure
+    # "The file suffix type .ipynb is not supported"). The format=ipynb
+    # query param tells the API to interpret the *payload* as ipynb.
     new_part = {
-        "path": ipynb_path,
+        "path": "notebook-content.py",
         "payload": base64.b64encode(new_bytes).decode("ascii"),
         "payloadType": "InlineBase64",
     }
