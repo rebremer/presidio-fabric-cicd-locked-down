@@ -91,94 +91,35 @@ stages:
           - ${{ if eq(parameters.vendorWheels, true) }}:
             - bash: |
                 set -euo pipefail
-                export PATH="$HOME/miniconda3/bin:$PATH"
-                source "$HOME/miniconda3/etc/profile.d/conda.sh"
 
-                RUNTIME_YML='${{ parameters.fabricRuntimeYml }}'
-                RUNTIME_DIR='${{ parameters.fabricRuntimeDir }}'
-                # URL-encode spaces and parentheses in the directory name
-                RUNTIME_DIR_ENC=$(printf '%s' "$RUNTIME_DIR" | sed 's/ /%20/g; s/(/%28/g; s/)/%29/g')
-                RUNTIME_URL="https://raw.githubusercontent.com/microsoft/synapse-spark-runtime/main/Fabric/${RUNTIME_DIR_ENC}/${RUNTIME_YML}"
-
-                echo "==> Fetching Fabric runtime YML: ${RUNTIME_URL}"
-                curl -fsSL "$RUNTIME_URL" -o "/tmp/${RUNTIME_YML}"
-
-                # Strip Microsoft-private libraries (per docs). Keep this list
-                # in sync with the table at:
-                # https://learn.microsoft.com/fabric/data-engineering/environment-manage-library-with-outbound-access-protection#step-2-remove-private-libraries-from-the-yml-file
-                PRIVATE_PKGS=(
-                  "azure-synapse-ml-predict"
-                  "azureml-synapse"
-                  "chat-magics"
-                  "chat-magics-fabric"
-                  "control-script"
-                  "ds-copilot"
-                  "dscopilot-installer"
-                  "fabric-analytics-notebook-plugin"
-                  "fabric-analytics-sdk"
-                  "fabric-connection"
-                  "flaml"
-                  "flt-python"
-                  "fsspec_wrapper"
-                  "geoanalytics-fabric"
-                  "impulse-python-handler"
-                  "kqlmagiccustom"
-                  "library-metadata-cooker"
-                  "notebookutils"
-                  "prose-pandas2pyspark"
-                  "prose-suggestions"
-                  "semantic-link-sempy"
-                  "spark-mssql-connector-fabric35"
-                  "spark-mssql-connector-fabric40"
-                  "sqlanalyticsconnectorpy"
-                  "sqlanalyticsfabricconnectorpy"
-                  "synapseml"
-                  "synapseml-cognitive"
-                  "synapseml-core"
-                  "synapseml-deep-learning"
-                  "synapseml-internal"
-                  "synapseml-lightgbm"
-                  "synapseml-opencv"
-                  "synapseml-vw"
-                )
-                cp "/tmp/${RUNTIME_YML}" "/tmp/${RUNTIME_YML}.orig"
-                for pkg in "${PRIVATE_PKGS[@]}"; do
-                  sed -i "/[[:space:]-][[:space:]]*${pkg}\([=<>!~ ]\|$\)/d" "/tmp/${RUNTIME_YML}"
-                done
-                echo "==> Stripped $(diff /tmp/${RUNTIME_YML}.orig /tmp/${RUNTIME_YML} | grep -c '^<') private packages"
-
-                # Drop Microsoft-private conda build pins (e.g. "=py_0") so
-                # conda-forge can resolve any matching version. Only affects
-                # conda lines like "  - pkg=1.2.3=build"; pip lines untouched.
-                sed -i -E '/^[[:space:]]*-[[:space:]]+[A-Za-z0-9_.-]+=[^=]+=[^[:space:]]+/{s/=([^=]+)=[^[:space:]]+/=\1/}' "/tmp/${RUNTIME_YML}"
-
-                # Ensure conda-forge is the primary channel (Microsoft private
-                # channels are unreachable from non-MS subscriptions).
-                # Replace the channels: block (everything between 'channels:' and 'dependencies:').
-                sed -i '/^channels:/,/^dependencies:/{//!d}; /^channels:/a\  - conda-forge\n  - defaults' "/tmp/${RUNTIME_YML}"
-
-                echo "==> Effective channels:"
-                grep -A3 '^channels:' "/tmp/${RUNTIME_YML}"
-
-                echo "==> Creating conda env '${CONDA_ENV_NAME}' from runtime YML"
-                conda env remove -n "${CONDA_ENV_NAME}" -y >/dev/null 2>&1 || true
-                conda env create -n "${CONDA_ENV_NAME}" -f "/tmp/${RUNTIME_YML}"
-                conda activate "${CONDA_ENV_NAME}"
+                # Strategy: download Linux Python 3.11 wheels for the *deltas*
+                # (presidio + spaCy model) only. Fabric runtime already provides
+                # the rest (numpy, pandas, requests, etc). pip's --platform +
+                # --python-version + --only-binary lets us cross-target Linux
+                # manylinux wheels without needing the full Fabric conda env.
 
                 echo "==> Pre-clean ${CUSTOM_LIBS_DIR}"
                 mkdir -p "${CUSTOM_LIBS_DIR}"
                 find "${CUSTOM_LIBS_DIR}" -type f \( -name '*.whl' -o -name '*.tar.gz' \) -delete
 
-                echo "==> pip download deltas into ${CUSTOM_LIBS_DIR}"
-                pip download -r requirements-presidio.txt -d "${CUSTOM_LIBS_DIR}"
+                echo "==> pip download Linux py3.11 wheels into ${CUSTOM_LIBS_DIR}"
+                python3 -m pip download \
+                    --dest "${CUSTOM_LIBS_DIR}" \
+                    --python-version 3.11 \
+                    --platform manylinux2014_x86_64 \
+                    --platform manylinux_2_17_x86_64 \
+                    --platform manylinux_2_28_x86_64 \
+                    --implementation cp \
+                    --abi cp311 \
+                    --only-binary=:all: \
+                    -r requirements-presidio.txt
 
                 echo "==> Vendored wheels:"
                 ls -la "${CUSTOM_LIBS_DIR}"
                 echo "Total: $(ls "${CUSTOM_LIBS_DIR}" | wc -l) files"
               env:
-                CONDA_ENV_NAME: $(condaEnvName)
                 CUSTOM_LIBS_DIR: $(customLibsDir)
-              displayName: Vendor Presidio wheels (Fabric runtime mirror)
+              displayName: Vendor Presidio wheels (Linux py3.11 manylinux)
 
           - ${{ if eq(parameters.vendorWheels, false) }}:
             - bash: |
