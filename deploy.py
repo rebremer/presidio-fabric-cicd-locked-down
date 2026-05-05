@@ -121,6 +121,26 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
         raise
     time.sleep(5)
 
+    # Read the published notebook back so we can confirm what Fabric
+    # actually stored (the portal can be misleading about env binding).
+    get_url = f"{fabric_workspace_obj.base_api_url}/notebooks/{nb.guid}/getDefinition"
+    print(f"  POST {get_url}")
+    try:
+        getd = fabric_workspace_obj.endpoint.invoke(method="POST", url=get_url, body={})
+        body_obj = getd.get("body", {}) if isinstance(getd, dict) else {}
+        parts_out = body_obj.get("definition", {}).get("parts", [])
+        for p in parts_out:
+            if p.get("path") == "notebook-content.py":
+                content = base64.b64decode(p["payload"]).decode("utf-8", errors="replace")
+                head = "\n".join(content.splitlines()[:20])
+                print("  ----- deployed notebook-content.py (first 20 lines) -----")
+                print(head)
+                print("  ---------------------------------------------------------")
+                has_env = '"environmentId"' in content
+                print(f"  deployed notebook contains environmentId: {has_env}")
+    except Exception as exc:
+        print(f"  WARN: could not read back notebook definition: {exc!r}")
+
 
 def main() -> None:
     workspace_id = os.environ["FABRIC_WORKSPACE_ID"]
