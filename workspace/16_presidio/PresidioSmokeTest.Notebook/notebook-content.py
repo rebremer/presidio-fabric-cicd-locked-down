@@ -23,6 +23,17 @@
 
 # CELL ********************
 
+# tldextract (transitive dep of presidio-analyzer's URL recognizer) tries
+# to refresh the public-suffix list from publicsuffix.org on first use.
+# DEP outbound blocks that. tldextract will fall back to its bundled
+# snapshot, but only when it sees `SuffixListNotFound` -- a raw
+# `ConnectionError` propagates instead. Patch the network fetch to raise
+# `SuffixListNotFound` immediately so the snapshot path is taken.
+import tldextract.suffix_list as _sl
+def _no_network(*args, **kwargs):
+    raise _sl.SuffixListNotFound("Network blocked by DEP outbound policy")
+_sl.find_first_response = _no_network
+
 import importlib.metadata as ilmd
 import presidio_analyzer  # noqa: F401
 import presidio_anonymizer  # noqa: F401
@@ -57,16 +68,7 @@ nlp_engine = NlpEngineProvider(nlp_configuration={
 }).create_engine()
 
 analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
-
-# Restrict to the entities we actually need for this smoke test. The default
-# entity set includes URL detection, which uses tldextract and tries to
-# refresh the public-suffix list from publicsuffix.org -- DEP outbound
-# blocks this, so we explicitly skip it.
-results = analyzer.analyze(
-    text=text,
-    language="en",
-    entities=["EMAIL_ADDRESS", "PHONE_NUMBER", "PERSON", "US_SSN"],
-)
+results = analyzer.analyze(text=text, language="en")
 
 for r in results:
     print(f"{r.entity_type:15s} score={r.score:.2f}  '{text[r.start:r.end]}'")
