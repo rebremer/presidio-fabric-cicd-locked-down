@@ -2,9 +2,17 @@
 
 End-to-end CI/CD that deploys Microsoft **Presidio** (PII detection +
 anonymization) into a Microsoft Fabric **Environment** item inside a
-**WSPL/DEP-protected** workspace (no public inbound, no pypi.org/conda-forge
-outbound), using [fabric-cicd](https://microsoft.github.io/fabric-cicd/)
-driven from **Azure DevOps** through a self-hosted Linux agent.
+workspace locked down with both:
+
+- **WSPL** — Workspace-Level Private Link: no public inbound, the workspace
+  is reachable only over its private endpoint FQDN.
+- **DEP** — Data Exfiltration Protection: no public outbound, so pypi.org,
+  conda-forge, publicsuffix.org, etc. are unreachable from Spark.
+
+Built on [fabric-cicd](https://microsoft.github.io/fabric-cicd/), driven
+from **Azure DevOps** through a self-hosted Linux agent inside the same
+VNet, authenticated to Fabric via a **User-Assigned Managed Identity** and
+**Workload Identity Federation** (no client secrets stored anywhere).
 
 ## Architecture
 
