@@ -1,14 +1,10 @@
 # fabric-cicd parameter file (https://microsoft.github.io/fabric-cicd/1.0.0/how_to/parameterization/)
 #
-# The notebook source under workspace/16_presidio/PresidioSmokeTest.Notebook
-# references the Presidio environment via placeholders so the file is
-# portable across workspaces. fabric-cicd substitutes them at publish time
-# using the entries below.
-find_replace:
-  # Notebook -> environment binding
-  - find_value: "00000000-0000-0000-0000-000000000003"
-    replace_value:
-      PPE: "3cc98fb6-fd11-439a-b3fd-2ec61df5494c"  # PresidioPriv env id
-  - find_value: "00000000-0000-0000-0000-000000000000"
-    replace_value:
-      PPE: "fc5a31aa-23f6-4a07-9b8b-8df04c70facd"  # testpriv workspace id
+# Intentionally empty: this repo targets a single fixed workspace+environment,
+# and the notebook's environment binding is hardcoded in
+#   workspace/16_presidio/PresidioSmokeTest.Notebook/notebook-content.py
+# (the `# META "environmentId" / "workspaceId"` block).
+#
+# Re-introduce find_replace entries here if this deployment ever needs to
+# move between environments (e.g. dev/prod workspaces).
+find_replace: []
