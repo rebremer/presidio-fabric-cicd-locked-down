@@ -155,22 +155,23 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
     print(f"  set metadata.dependencies.environment = {deps['environment']}")
 
     new_bytes = json.dumps(nb_json, indent=2).encode("utf-8")
-    # Storage path must keep the .py suffix even when format=ipynb
-    # (Fabric's converter rejects .ipynb path with PyToIPynbFailure
-    # "The file suffix type .ipynb is not supported"). The format=ipynb
-    # query param tells the API to interpret the *payload* as ipynb.
+    # Mirror getDefinition: keep .ipynb path AND set format=ipynb in
+    # the body. The earlier ?format=ipynb URL param tells Fabric to
+    # *convert* py->ipynb and rejects either suffix; specifying format
+    # inside the definition body is the correct shape (same way
+    # fabricGitSource is declared).
     new_part = {
-        "path": "notebook-content.py",
+        "path": ipynb_path,
         "payload": base64.b64encode(new_bytes).decode("ascii"),
         "payloadType": "InlineBase64",
     }
 
-    # 3. POST it back in ipynb format.
+    # 3. POST it back as ipynb (no ?format query, format inside body).
     put_url = (
         f"{fabric_workspace_obj.base_api_url}/notebooks/{nb.guid}"
-        f"/updateDefinition?format=ipynb"
+        f"/updateDefinition"
     )
-    body = {"definition": {"parts": [new_part]}}
+    body = {"definition": {"format": "ipynb", "parts": [new_part]}}
     print(f"  POST {put_url}")
     try:
         resp = fabric_workspace_obj.endpoint.invoke(method="POST", url=put_url, body=body)
