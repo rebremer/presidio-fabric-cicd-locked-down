@@ -25,13 +25,16 @@
 
 # tldextract (transitive dep of presidio-analyzer's URL recognizer) tries
 # to refresh the public-suffix list from publicsuffix.org on first use.
-# DEP outbound blocks that, raising ConnectionError. Force every TLDExtract
-# instance to use only the snapshot bundled inside the wheel.
+# DEP outbound blocks that, raising ConnectionError. Disable the network
+# fetch on (a) the module-level singleton `tldextract.extract` (already
+# constructed at import time) and (b) any new TLDExtract instance.
 import tldextract as _tld
+_snapshot_only = _tld.TLDExtract(suffix_list_urls=(), fallback_to_snapshot=True)
+_tld.extract = _snapshot_only
 _orig_init = _tld.TLDExtract.__init__
 def _patched_init(self, *args, **kwargs):
-    kwargs.setdefault("suffix_list_urls", ())
-    kwargs.setdefault("fallback_to_snapshot", True)
+    kwargs["suffix_list_urls"] = ()
+    kwargs["fallback_to_snapshot"] = True
     _orig_init(self, *args, **kwargs)
 _tld.TLDExtract.__init__ = _patched_init
 
