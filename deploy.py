@@ -31,6 +31,39 @@ from fabric_cicd import (
     unpublish_all_orphan_items,
 )
 from fabric_cicd import constants as fabric_constants
+from fabric_cicd._items import _environment as _env_mod
+from fabric_cicd.constants import ItemType
+
+
+def _patch_clear_environment_yml() -> None:
+    """
+    Monkey-patch fabric-cicd to clear `environment.yml` from staging/libraries
+    BEFORE triggering publish.
+
+    Why: in WSPL/DEP-locked workspaces, Fabric's publish backend cannot resolve
+    public conda/pip dependencies (pypi.org and conda-forge are blocked). The
+    only state that publishes successfully is `environmentYml: ""` (verified
+    against a manually-created working env). fabric-cicd uploads environment.yml
+    as a definition part and the API rejects empty payload, so we delete it
+    server-side after upload but before publish.
+    """
+    original = _env_mod._publish_environment_metadata
+
+    def patched(fabric_workspace_obj, item_name):
+        item_guid = fabric_workspace_obj.repository_items[ItemType.ENVIRONMENT.value][item_name].guid
+        url = (
+            f"{fabric_workspace_obj.base_api_url}/environments/{item_guid}"
+            f"/staging/libraries?libraryToDelete=environment.yml"
+        )
+        try:
+            fabric_workspace_obj.endpoint.invoke(method="DELETE", url=url)
+            print(f"  Cleared environment.yml from staging/libraries for '{item_name}'")
+        except Exception as exc:
+            # Non-fatal: if there was no environment.yml staged, the API may 404.
+            print(f"  Warning: could not delete staged environment.yml for '{item_name}': {exc}")
+        return original(fabric_workspace_obj, item_name)
+
+    _env_mod._publish_environment_metadata = patched
 
 
 def main() -> None:
@@ -52,6 +85,8 @@ def main() -> None:
 
     if os.environ.get("FABRIC_DEBUG", "").lower() in ("1", "true", "yes"):
         change_log_level("DEBUG")
+
+    _patch_clear_environment_yml()
 
     target_workspace = FabricWorkspace(
         workspace_id=workspace_id,
