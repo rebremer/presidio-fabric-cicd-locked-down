@@ -89,14 +89,20 @@ Already created via `az devops project create`:
 
 Spin up an **Ubuntu 22.04 VM** in the same VNet as the workspace's Private
 Endpoint (so it inherits the `privatelink.fabric.microsoft.com` private DNS
-zone link). On that VM:
+zone link). The agent only needs the bootstrap script — pipeline runs
+`checkout: self` to fetch the repo on each run, so don't clone it on the
+VM.
+
+Copy `scripts/setup-agent.sh` to the VM (e.g. via `scp` from your dev box)
+and run it with a PAT scoped to *Agent Pools (Read & manage)*:
 
 ```bash
-# Create a PAT with scope "Agent Pools (Read & manage)" at:
-#   https://dev.azure.com/<org>/_usersSettings/tokens
-git clone https://dev.azure.com/renebremer/test-presidio-cicd-privenv/_git/test-presidio-cicd-privenv
-cd test-presidio-cicd-privenv
-ORG_URL=https://dev.azure.com/renebremer PAT=<pat> ./scripts/setup-agent.sh
+# From your dev box:
+scp scripts/setup-agent.sh azureuser@<vm-ip>:~/
+
+# On the Ubuntu VM:
+chmod +x setup-agent.sh
+ORG_URL=https://dev.azure.com/renebremer PAT=<pat> ./setup-agent.sh
 ```
 
 The script installs apt build tools, Miniconda, the Azure CLI, and the ADO
