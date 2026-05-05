@@ -1,2 +1,1 @@
-# No public conda/pip deps. WSPL blocks conda-forge/pypi.org. All wheels vendored in CustomLibraries/.
-
+ 
