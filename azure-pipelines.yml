@@ -117,3 +117,50 @@ stages:
                 # az session; DefaultAzureCredential -> AzureCliCredential
                 # will reuse it for fabric-cicd.
                 python3 deploy.py
+
+          - task: AzureCLI@2
+            displayName: Run smoke-test notebook
+            env:
+              FABRIC_WORKSPACE_ID: $(FABRIC_WORKSPACE_ID)
+              FABRIC_BASE_API_URL: $(FABRIC_BASE_API_URL)
+              SMOKE_NOTEBOOK_NAME: PresidioSmokeTest
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+
+                TOKEN=$(az account get-access-token --resource https://api.fabric.microsoft.com --query accessToken -o tsv)
+                BASE="${FABRIC_BASE_API_URL}/v1/workspaces/${FABRIC_WORKSPACE_ID}"
+
+                echo "==> Resolving notebook id for '${SMOKE_NOTEBOOK_NAME}'"
+                NB_ID=$(curl -sS -H "Authorization: Bearer $TOKEN" "${BASE}/notebooks" \
+                    | python3 -c "import json,sys,os; n=os.environ['SMOKE_NOTEBOOK_NAME']; \
+                                  print(next(i['id'] for i in json.load(sys.stdin)['value'] if i['displayName']==n))")
+                echo "    notebook id: ${NB_ID}"
+
+                echo "==> Triggering notebook run"
+                LOC=$(curl -sS -D - -o /dev/null -X POST \
+                    -H "Authorization: Bearer $TOKEN" \
+                    -H "Content-Length: 0" \
+                    "${BASE}/items/${NB_ID}/jobs/instances?jobType=RunNotebook" \
+                    | tr -d '\r' | awk -F': ' '/^[Ll]ocation:/ {print $2}')
+                echo "    job location: ${LOC}"
+
+                echo "==> Polling job status"
+                for i in $(seq 1 60); do
+                    sleep 20
+                    STATUS=$(curl -sS -H "Authorization: Bearer $TOKEN" "${LOC}" \
+                        | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))")
+                    echo "    [${i}] status=${STATUS}"
+                    case "$STATUS" in
+                        Completed) echo "Notebook run succeeded."; exit 0 ;;
+                        Failed|Cancelled|Deduped)
+                            echo "Notebook run ended with status: $STATUS"
+                            curl -sS -H "Authorization: Bearer $TOKEN" "${LOC}" | python3 -m json.tool
+                            exit 1 ;;
+                    esac
+                done
+                echo "Timeout waiting for notebook run."
+                exit 1
