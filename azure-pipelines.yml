@@ -103,8 +103,14 @@ stages:
                 find "${CUSTOM_LIBS_DIR}" -type f \( -name '*.whl' -o -name '*.tar.gz' \) -delete
 
                 echo "==> pip download Linux py3.11 wheels into ${CUSTOM_LIBS_DIR}"
+                # --no-deps: only fetch what's listed in requirements-presidio.txt.
+                # Fabric runtime already provides numpy/pydantic/requests/etc.;
+                # pulling them again risks version conflicts on publish.
+                # If smoke-test reports a missing transitive (ModuleNotFoundError),
+                # add it explicitly to requirements-presidio.txt.
                 python3 -m pip download \
                     --dest "${CUSTOM_LIBS_DIR}" \
+                    --no-deps \
                     --python-version 3.11 \
                     --platform manylinux2014_x86_64 \
                     --platform manylinux_2_17_x86_64 \
