@@ -147,6 +147,19 @@ stages:
                 done
                 echo "==> Stripped $(diff /tmp/${RUNTIME_YML}.orig /tmp/${RUNTIME_YML} | grep -c '^<') private packages"
 
+                # Drop Microsoft-private conda build pins (e.g. "=py_0") so
+                # conda-forge can resolve any matching version. Only affects
+                # conda lines like "  - pkg=1.2.3=build"; pip lines untouched.
+                sed -i -E '/^[[:space:]]*-[[:space:]]+[A-Za-z0-9_.-]+=[^=]+=[^[:space:]]+/{s/=([^=]+)=[^[:space:]]+/=\1/}' "/tmp/${RUNTIME_YML}"
+
+                # Ensure conda-forge is the primary channel (Microsoft private
+                # channels are unreachable from non-MS subscriptions).
+                # Replace the channels: block (everything between 'channels:' and 'dependencies:').
+                sed -i '/^channels:/,/^dependencies:/{//!d}; /^channels:/a\  - conda-forge\n  - defaults' "/tmp/${RUNTIME_YML}"
+
+                echo "==> Effective channels:"
+                grep -A3 '^channels:' "/tmp/${RUNTIME_YML}"
+
                 echo "==> Creating conda env '${CONDA_ENV_NAME}' from runtime YML"
                 conda env remove -n "${CONDA_ENV_NAME}" -y >/dev/null 2>&1 || true
                 conda env create -n "${CONDA_ENV_NAME}" -f "/tmp/${RUNTIME_YML}"
