@@ -106,6 +106,13 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
     workspace_guid = fabric_workspace_obj.workspace_id
     print(f"  binding to environmentId={env_guid} workspaceId={workspace_guid}")
 
+    # Cancel any running notebook jobs/sessions on this notebook -- a
+    # live Spark session pins the notebook definition and silently
+    # rejects subsequent updateDefinition calls (Fabric portal has the
+    # same constraint: env binding can only be changed after the
+    # session is stopped).
+    _cancel_running_notebook_jobs(fabric_workspace_obj, nb.guid)
+
     # Wait for the environment publish to settle. Fabric silently strips
     # notebook->environment bindings whose target env is mid-publish
     # (sparkLibraries.state == 'Running'); we must block until it
@@ -179,6 +186,37 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
     except Exception as exc:
         print(f"  ERROR verifying notebook env binding: {exc!r}")
         raise
+
+
+def _cancel_running_notebook_jobs(fabric_workspace_obj, notebook_guid: str) -> None:
+    """
+    List job instances for the notebook and cancel any in non-terminal
+    state. Fabric pins notebook definition while a Spark session is
+    active, so updateDefinition silently no-ops until the session ends.
+    """
+    list_url = f"{fabric_workspace_obj.base_api_url}/items/{notebook_guid}/jobs/instances"
+    try:
+        resp = fabric_workspace_obj.endpoint.invoke(method="GET", url=list_url)
+    except Exception as exc:
+        print(f"  WARN: could not list notebook jobs: {exc!r}")
+        return
+    body = resp.get("body", {}) if isinstance(resp, dict) else {}
+    instances = body.get("value", [])
+    active = [i for i in instances if i.get("status") in ("InProgress", "NotStarted")]
+    if not active:
+        print("  no active notebook jobs to cancel")
+        return
+    print(f"  cancelling {len(active)} active notebook job(s)")
+    for inst in active:
+        inst_id = inst.get("id")
+        cancel_url = f"{fabric_workspace_obj.base_api_url}/items/{notebook_guid}/jobs/instances/{inst_id}/cancel"
+        try:
+            fabric_workspace_obj.endpoint.invoke(method="POST", url=cancel_url, body={})
+            print(f"    cancelled {inst_id}")
+        except Exception as exc:
+            print(f"    WARN: could not cancel {inst_id}: {exc!r}")
+    # Brief settle so the cancel takes effect before we updateDefinition.
+    time.sleep(15)
 
 
 def _lookup_environment_guid(fabric_workspace_obj, env_name: str) -> str | None:
