@@ -21,7 +21,9 @@ resolves to AzureCliCredential -- no client secret stored anywhere (WIF).
 
 from __future__ import annotations
 
+import base64
 import os
+import time
 from pathlib import Path
 
 from azure.identity import DefaultAzureCredential
@@ -68,6 +70,44 @@ def _patch_clear_environment_yml() -> None:
     _env_mod._publish_environment_metadata = patched
 
 
+def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> None:
+    """
+    Re-POST the notebook's source-controlled definition through the
+    notebook-specific updateDefinition endpoint. This is a workaround for
+    fabric-cicd 1.0 publishing notebooks via the generic /items endpoint,
+    which drops the `# META "dependencies": { "environment": {...} }`
+    block from notebook-content.py and leaves the notebook attached to
+    the workspace's default environment.
+    """
+    repo_items = fabric_workspace_obj.repository_items
+    nb = repo_items.get(ItemType.NOTEBOOK.value, {}).get(notebook_name)
+    if nb is None or not nb.guid:
+        print(f"  Skipping env-binding force: notebook '{notebook_name}' not in repo or not deployed")
+        return
+
+    nb_dir = Path(nb.path)
+    parts = []
+    for fname in ("notebook-content.py", ".platform"):
+        fpath = nb_dir / fname
+        if not fpath.exists():
+            continue
+        payload_b64 = base64.b64encode(fpath.read_bytes()).decode("ascii")
+        parts.append({"path": fname, "payload": payload_b64, "payloadType": "InlineBase64"})
+
+    url = (
+        f"{fabric_workspace_obj.base_api_url}/notebooks/{nb.guid}"
+        f"/updateDefinition?updateMetadata=True"
+    )
+    body = {"definition": {"parts": parts}}
+    print(f"  Forcing notebook env binding via {url}")
+    resp = fabric_workspace_obj.endpoint.invoke(method="POST", url=url, body=body)
+    # 202 = accepted, LRO; 200 = sync success
+    print(f"  updateDefinition response: status={resp.get('status_code', '?')}")
+    # Brief settle to let LRO complete (fabric-cicd's invoke usually polls,
+    # but we add a small grace period before any downstream smoke test).
+    time.sleep(5)
+
+
 def main() -> None:
     workspace_id = os.environ["FABRIC_WORKSPACE_ID"]
     environment = os.environ.get("FABRIC_ENVIRONMENT", "PPE")
@@ -106,6 +146,15 @@ def main() -> None:
     )
 
     publish_all_items(target_workspace)
+
+    # Force the notebook's environment binding via the notebook-specific
+    # REST endpoint. fabric-cicd publishes notebooks via the generic
+    # /items endpoint which appears to drop the `# META "dependencies"`
+    # block from notebook-content.py, leaving the notebook attached to
+    # the workspace's default (i.e. no) environment. Re-POST the same
+    # definition through the notebook-specific updateDefinition endpoint
+    # which preserves it.
+    _force_notebook_env_binding(target_workspace, "PresidioSmokeTest")
 
     # Only unpublish items that we own (safety guard:
     # do not touch unrelated items if scope is widened later).
