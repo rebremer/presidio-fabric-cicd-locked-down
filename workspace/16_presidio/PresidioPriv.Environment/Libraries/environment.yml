@@ -1,9 +1,3 @@
-# Fabric needs python + pip listed for the library-builder to actually run
-# pip install on the wheels in CustomLibraries/. Without these, publish
-# rubber-stamps as Success in ~5s but never installs anything, and notebooks
-# fail with ModuleNotFoundError.
-# Real PyPI deps are vendored as wheels into Libraries/CustomLibraries/ via
-# the pipeline's "Vendor Presidio wheels" step (see requirements-presidio.txt).
 dependencies:
   - python=3.11
   - pip

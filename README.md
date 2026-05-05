@@ -22,11 +22,13 @@ anonymization) into a Microsoft Fabric **Environment** item using
                                  │ job dispatched to pool 'Default'
                                  ▼
               ┌──────────────────────────────────────────┐
-              │  Self-hosted agent (test-fabricjumphost-vm)
-              │   • Python 3.11   • Azure CLI            │
+              │  Self-hosted Linux agent (Ubuntu)        │
+              │   • Python 3.11 + Miniconda + Az CLI    │
               │   • fabric-cicd (pip)                    │
               │   • In VNet linked to privatelink.fabric │
               │     .microsoft.com private DNS zone      │
+              │   • Mirrors Fabric runtime YML so wheels  │
+              │     resolve against the same conda graph │
               └─────────────────────────┬────────────────┘
                                         │ REST (UAMI token via WIF)
                                         │ to <wsid>.zfc.w.api.fabric...
@@ -56,16 +58,17 @@ anonymization) into a Microsoft Fabric **Environment** item using
 
 ```
 .
-├── azure-pipelines.yml             # ADO pipeline definition
+├── azure-pipelines.yml             # ADO pipeline definition (Linux)
 ├── deploy.py                       # fabric-cicd entry point
 ├── requirements-deploy.txt         # fabric-cicd + azure-identity (agent)
-├── requirements-presidio.txt       # Presidio wheels vendored into Env
+├── requirements-presidio.txt       # Presidio deltas (no runtime dups)
 ├── scripts/
-│   └── setup-agent.ps1             # one-shot bootstrap for the ADO agent VM
+│   ├── setup-agent.sh              # bootstrap an Ubuntu ADO agent
+│   └── setup-agent.ps1             # legacy: Windows ADO agent
 └── workspace/
     ├── parameter.yml               # fabric-cicd find_replace / spark_pool
     └── 16_presidio/
-        ├── Presidio.Environment/
+        ├── PresidioPriv.Environment/
         │   ├── .platform
         │   ├── Setting/Sparkcompute.yml
         │   └── Libraries/
@@ -82,28 +85,32 @@ anonymization) into a Microsoft Fabric **Environment** item using
 Already created via `az devops project create`:
 <https://dev.azure.com/renebremer/test-presidio-cicd-privenv>
 
-### 2. Self-hosted agent
-On the agent VM (e.g. `test-fabricjumphost-vm`), in **elevated PowerShell**:
+### 2. Self-hosted Linux agent
 
-```powershell
+Spin up an **Ubuntu 22.04 VM** in the same VNet as the workspace's Private
+Endpoint (so it inherits the `privatelink.fabric.microsoft.com` private DNS
+zone link). On that VM:
+
+```bash
 # Create a PAT with scope "Agent Pools (Read & manage)" at:
-#   https://dev.azure.com/renebremer/_usersSettings/tokens
-.\scripts\setup-agent.ps1 `
-  -OrgUrl https://dev.azure.com/renebremer `
-  -Pat   <pat>
+#   https://dev.azure.com/<org>/_usersSettings/tokens
+git clone https://github.com/rebremer/test-presidio-cicd-privenv.git
+cd test-presidio-cicd-privenv
+ORG_URL=https://dev.azure.com/renebremer PAT=<pat> ./scripts/setup-agent.sh
 ```
 
-If the VM has no internet, copy these to `C:\agent\` first and add
-`-SkipDownloads`:
+The script installs apt build tools, Miniconda, the Azure CLI, and the ADO
+agent (registered in pool `Default` as a systemd service running under the
+current user so conda is on PATH). After it finishes, revoke the PAT — the
+agent has its own per-agent OAuth token.
 
-| File | Source |
-|---|---|
-| `python-installer.exe` | <https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe> |
-| `az-cli.msi`           | <https://aka.ms/installazurecliwindowsx64> |
-| `agent.zip`            | <https://vstsagentpackage.azureedge.net/agent/3.243.1/vsts-agent-win-x64-3.243.1.zip> |
-
-After the script finishes, revoke the PAT — the agent has its own per-agent
-OAuth token.
+> **Why Linux?** Microsoft's [DEP library docs](https://learn.microsoft.com/fabric/data-engineering/environment-manage-library-with-outbound-access-protection#prerequisites)
+> require building wheels in a Linux conda env that mirrors the Fabric Spark
+> runtime image. Resolving on Windows produces wheels that conflict with the
+> Linux runtime and the publish fails silently.
+>
+> The legacy `scripts/setup-agent.ps1` is kept for the (non-DEP) public
+> workspace path.
 
 ### 3. Service connection
 Project Settings → **Service connections** → *Azure Resource Manager*
@@ -133,26 +140,28 @@ fabric-cicd polls the staging endpoint until it completes.
 ## Move to the DEP private workspace
 
 `pypi.org` is unreachable from inside a DEP-protected workspace, so the
-Fabric Environment publish cannot resolve any `pip:` deps itself. The
-pipeline solves this **automatically**:
+Fabric Environment publish cannot resolve any `pip:` deps itself. Per
+[Microsoft's documented workflow](https://learn.microsoft.com/fabric/data-engineering/environment-manage-library-with-outbound-access-protection),
+wheels must be **built against an exact replica of the Fabric runtime conda
+env** so they don't conflict with packages already in the runtime image.
+The pipeline does this automatically:
 
-1. The `Vendor Presidio wheels` step in `azure-pipelines.yml` runs
-   `pip download -r requirements-presidio.txt` on the self-hosted agent
-   (which still has internet to pypi.org) and drops the resulting `.whl`
-   files into
-   `workspace/16_presidio/Presidio.Environment/Libraries/CustomLibraries/`.
-2. `Libraries/environment.yml` is conda-only (`python=3.11`, `pip`) — no
-   `pip:` block — so Fabric never tries to call out to pypi.org during
-   publish.
-3. fabric-cicd uploads the wheels along with the rest of the Environment
-   definition; Fabric installs them from the local `CustomLibraries/`.
+1. Downloads `Fabric-Python311-CPU.yml` from
+   [microsoft/synapse-spark-runtime](https://github.com/microsoft/synapse-spark-runtime/tree/main/Fabric).
+2. Strips the Microsoft-private packages (`notebookutils`,
+   `semantic-link-sempy`, `synapseml*`, etc.) that pip can't resolve.
+3. `conda env create -n fabric-env -f <yml>` — mirrors the runtime image.
+4. `pip download -r requirements-presidio.txt -d CustomLibraries/` resolves
+   only the deltas; transitives that already ship with the runtime are
+   intentionally *not* listed in `requirements-presidio.txt` and are *not*
+   uploaded.
+5. `Libraries/environment.yml` is conda-only (`python=3.11`, `pip`) — no
+   `pip:` block — so Fabric never tries to call out to pypi.org.
+6. fabric-cicd uploads the resulting wheels with the rest of the
+   Environment definition; Fabric installs them from `CustomLibraries/`.
 
 Wheels are produced fresh per pipeline run and excluded from git via
 `.gitignore`. To bump versions, edit `requirements-presidio.txt` and push.
-
-If the agent itself has no internet to pypi.org either, mirror the wheels
-to an internal Artifact Feed and add `--index-url` to the vendor step (or
-commit the wheels and skip the step entirely).
 
 ## Deploy to a workspace reachable only via Private Link
 
