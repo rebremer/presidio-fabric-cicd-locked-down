@@ -1,11 +1,11 @@
 # Azure DevOps pipeline: deploy the Presidio Fabric environment + smoke-test
-# notebook into a DEP-protected workspace using fabric-cicd.
+# notebook into a WSPL/DEP-protected Fabric workspace using fabric-cicd.
 #
 # Runs on a self-hosted Ubuntu agent (see scripts/setup-agent.sh) registered
 # in pool 'Default'. The agent must:
-#   - have outbound internet to pypi.org, repo.anaconda.com, github.com
+#   - have outbound internet to pypi.org and dev.azure.com
 #   - have private DNS resolution for the workspace's WSPL FQDN
-#     (vnet linked to privatelink.fabric.microsoft.com zone)
+#     (VNet linked to the privatelink.fabric.microsoft.com zone)
 #
 # Pipeline variables (set in ADO -> Pipelines -> Edit -> Variables):
 #   AZURE_SERVICE_CONNECTION = <UAMI/WIF service connection name>
@@ -13,14 +13,14 @@
 #   FABRIC_BASE_API_URL      = https://<wsid-no-dashes>.zfc.w.api.fabric.microsoft.com
 #   FABRIC_ENVIRONMENT       = PPE
 #
-# Wheel-vendoring strategy follows
-# https://learn.microsoft.com/fabric/data-engineering/environment-manage-library-with-outbound-access-protection
-#   1. Download Fabric-Python311-CPU.yml from microsoft/synapse-spark-runtime
-#   2. Strip Microsoft-private packages (notebookutils, semantic-link-sempy,
-#      synapseml, etc.) so conda can resolve from public channels
-#   3. conda env create -> activates a replica of the Fabric runtime image
-#   4. pip download -r requirements-presidio.txt -d CustomLibraries/
-#      resolves only the deltas Fabric needs
+# Strategy:
+#   1. pip download (--platform manylinux* --python-version 3.11 --abi cp311
+#      --only-binary=:all:) the full transitive closure for Linux/cp311.
+#   2. fabric-cicd uploads the wheels into the env's CustomLibraries/ folder.
+#   3. deploy.py monkey-patches fabric-cicd to DELETE environment.yml from
+#      staging before publish: WSPL blocks pypi.org / conda-forge, so the
+#      Fabric publish backend must skip the public-deps resolve step.
+#      (Workspace storage where wheels live IS reachable via WSPL.)
 
 trigger:
   branches:
@@ -36,32 +36,14 @@ trigger:
 
 pr: none
 
-parameters:
-  - name: vendorWheels
-    displayName: Vendor Presidio wheels into CustomLibraries/
-    type: boolean
-    default: true
-  - name: fabricRuntimeYml
-    displayName: Fabric runtime YML to mirror locally
-    type: string
-    default: Fabric-Python311-CPU.yml
-  - name: fabricRuntimeDir
-    displayName: Subfolder under microsoft/synapse-spark-runtime/Fabric/
-    type: string
-    default: Runtime 1.3 (Spark 3.5)
-
 pool:
   name: Default
   demands:
     - Agent.OS -equals Linux
 
 variables:
-  - name: pythonVersion
-    value: "3.11"
   - name: customLibsDir
     value: workspace/16_presidio/PresidioPriv.Environment/Libraries/CustomLibraries
-  - name: condaEnvName
-    value: fabric-env
 
 stages:
   - stage: Deploy
@@ -78,7 +60,6 @@ stages:
               set -euo pipefail
               echo "Agent OS:    $(uname -a)"
               echo "Python:      $(python3 --version)"
-              echo "Conda:       $(~/miniconda3/bin/conda --version)"
               echo "Az CLI:      $(az --version | head -n 1)"
             displayName: Show toolchain versions
 
@@ -88,52 +69,34 @@ stages:
               python3 -m pip install --user -r requirements-deploy.txt
             displayName: Install fabric-cicd
 
-          - ${{ if eq(parameters.vendorWheels, true) }}:
-            - bash: |
-                set -euo pipefail
+          - bash: |
+              set -euo pipefail
+              echo "==> Pre-clean ${CUSTOM_LIBS_DIR}"
+              mkdir -p "${CUSTOM_LIBS_DIR}"
+              find "${CUSTOM_LIBS_DIR}" -type f \( -name '*.whl' -o -name '*.tar.gz' \) -delete
 
-                # Strategy: download Linux Python 3.11 wheels for the *deltas*
-                # (presidio + spaCy model) only. Fabric runtime already provides
-                # the rest (numpy, pandas, requests, etc). pip's --platform +
-                # --python-version + --only-binary lets us cross-target Linux
-                # manylinux wheels without needing the full Fabric conda env.
+              echo "==> pip download Linux py3.11 wheels into ${CUSTOM_LIBS_DIR}"
+              # Resolve full transitive closure for Linux/cp311. fabric-cicd
+              # uploads everything in CustomLibraries/ to workspace storage,
+              # which IS reachable via WSPL. Duplicates of packages already in
+              # the Fabric runtime are harmless (runtime wins at import time).
+              python3 -m pip download \
+                  --dest "${CUSTOM_LIBS_DIR}" \
+                  --python-version 3.11 \
+                  --platform manylinux2014_x86_64 \
+                  --platform manylinux_2_17_x86_64 \
+                  --platform manylinux_2_28_x86_64 \
+                  --implementation cp \
+                  --abi cp311 \
+                  --only-binary=:all: \
+                  -r requirements-presidio.txt
 
-                echo "==> Pre-clean ${CUSTOM_LIBS_DIR}"
-                mkdir -p "${CUSTOM_LIBS_DIR}"
-                find "${CUSTOM_LIBS_DIR}" -type f \( -name '*.whl' -o -name '*.tar.gz' \) -delete
-
-                echo "==> pip download Linux py3.11 wheels into ${CUSTOM_LIBS_DIR}"
-                # Resolve full transitive closure for Linux/py3.11. Fabric
-                # runtime will silently override duplicate packages with its
-                # own pinned versions at runtime — so shipping numpy/etc.
-                # alongside is wasteful but not fatal.
-                python3 -m pip download \
-                    --dest "${CUSTOM_LIBS_DIR}" \
-                    --python-version 3.11 \
-                    --platform manylinux2014_x86_64 \
-                    --platform manylinux_2_17_x86_64 \
-                    --platform manylinux_2_28_x86_64 \
-                    --implementation cp \
-                    --abi cp311 \
-                    --only-binary=:all: \
-                    -r requirements-presidio.txt
-
-                echo "==> Vendored wheels:"
-                ls -la "${CUSTOM_LIBS_DIR}"
-                echo "Total: $(ls "${CUSTOM_LIBS_DIR}" | wc -l) files"
-              env:
-                CUSTOM_LIBS_DIR: $(customLibsDir)
-              displayName: Vendor Presidio wheels (Linux py3.11 manylinux)
-
-          - ${{ if eq(parameters.vendorWheels, false) }}:
-            - bash: |
-                set -euo pipefail
-                mkdir -p "${CUSTOM_LIBS_DIR}"
-                find "${CUSTOM_LIBS_DIR}" -type f \( -name '*.whl' -o -name '*.tar.gz' \) -delete
-                echo "Skipped wheel vendoring -- publishing empty environment for diagnostics."
-              env:
-                CUSTOM_LIBS_DIR: $(customLibsDir)
-              displayName: Skip vendoring (diagnostic empty publish)
+              echo "==> Vendored wheels:"
+              ls -la "${CUSTOM_LIBS_DIR}"
+              echo "Total: $(ls "${CUSTOM_LIBS_DIR}" | wc -l) files"
+            env:
+              CUSTOM_LIBS_DIR: $(customLibsDir)
+            displayName: Vendor Presidio wheels (Linux py3.11 manylinux)
 
           - task: AzureCLI@2
             displayName: Run fabric-cicd deploy

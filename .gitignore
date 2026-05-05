@@ -4,8 +4,10 @@ __pycache__/
 .env
 *.log
 prompt.local.txt
+error_log.txt
+fabric_cicd.error.log
 
 # Wheels are vendored into the Environment item by the pipeline at build
 # time (see requirements-presidio.txt). Don't track binaries in git.
-workspace/16_presidio/Presidio.Environment/Libraries/CustomLibraries/*.whl
-workspace/16_presidio/Presidio.Environment/Libraries/CustomLibraries/*.tar.gz
+workspace/16_presidio/PresidioPriv.Environment/Libraries/CustomLibraries/*.whl
+workspace/16_presidio/PresidioPriv.Environment/Libraries/CustomLibraries/*.tar.gz

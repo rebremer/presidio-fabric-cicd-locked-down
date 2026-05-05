@@ -2,19 +2,21 @@
 # Licensed under the MIT License.
 
 """
-Deploy the Presidio Fabric Environment to the `testpub` workspace
-using the fabric-cicd library (https://microsoft.github.io/fabric-cicd/0.1.3/).
+Deploy the Presidio Fabric Environment + smoke-test notebook to a
+WSPL/DEP-protected Fabric workspace using the fabric-cicd library
+(https://microsoft.github.io/fabric-cicd/).
 
-Run from an Azure DevOps agent that has line-of-sight to the (DEP-protected)
-Fabric workspace, after `pip install -r requirements-deploy.txt`.
+Run from an Azure DevOps agent that has line-of-sight to the workspace's
+private FQDN, after `pip install -r requirements-deploy.txt`.
 
 Required environment variables:
-  FABRIC_WORKSPACE_ID   GUID of the target workspace (e.g. 'testpub')
+  FABRIC_WORKSPACE_ID   GUID of the target workspace
   FABRIC_ENVIRONMENT    Logical environment name used in parameter.yml (e.g. 'PPE')
+  FABRIC_BASE_API_URL   https://<wsid-no-dashes>.zfc.w.api.fabric.microsoft.com
 
-Optional (for SPN auth in Azure DevOps):
-  AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
-  -> picked up automatically by DefaultAzureCredential / EnvironmentCredential.
+Auth: AzureCLI@2 (with addSpnToEnvironment: true) sets AZURE_TENANT_ID and
+AZURE_CLIENT_ID and leaves an authenticated `az` session. DefaultAzureCredential
+resolves to AzureCliCredential -- no client secret stored anywhere (WIF).
 """
 
 from __future__ import annotations

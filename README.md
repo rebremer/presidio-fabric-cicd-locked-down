@@ -1,70 +1,99 @@
-# Presidio in a Fabric Environment — CI/CD with fabric-cicd
+# Presidio in a locked-down Fabric workspace — CI/CD with fabric-cicd
 
-End-to-end CI/CD scaffold that deploys Microsoft **Presidio** (PII detection +
-anonymization) into a Microsoft Fabric **Environment** item using
-[fabric-cicd](https://microsoft.github.io/fabric-cicd/), and runs it from
-**Azure DevOps** through a self-hosted agent that can reach a
-**DEP-protected** Fabric workspace.
+End-to-end CI/CD that deploys Microsoft **Presidio** (PII detection +
+anonymization) into a Microsoft Fabric **Environment** item inside a
+**WSPL/DEP-protected** workspace (no public inbound, no pypi.org/conda-forge
+outbound), using [fabric-cicd](https://microsoft.github.io/fabric-cicd/)
+driven from **Azure DevOps** through a self-hosted Linux agent.
 
 ## Architecture
 
 ```
-                        Laptop / dev box / Fabric feature workspace
-                              │
-                              │ git push
-                              ▼
-   ┌────────────────────────────────────────────────────────────┐
-   │  Azure DevOps  ── project: test-presidio-cicd-privenv      │
-   │   • Repos:    workspace/16_presidio/{Env, Notebook}        │
-   │   • Pipeline: deploy-presidio-fabric (azure-pipelines.yml) │
-   │   • Service connection (SPN, workload-identity)            │
-   └─────────────────────────────┬──────────────────────────────┘
-                                 │ job dispatched to pool 'Default'
+                              git push
+   Dev box ────────────────────────────────────────────────►  ADO Repos
+                                                                  │
+                                                                  ▼
+   ┌────────────────────────────────────────────────────────────────────┐
+   │  Azure DevOps pipeline (deploy-presidio-fabric)                    │
+   │   - service connection: UAMI via Workload Identity Federation      │
+   │   - dispatches to pool 'Default' (Linux demand)                    │
+   └─────────────────────────────┬──────────────────────────────────────┘
+                                 │
                                  ▼
               ┌──────────────────────────────────────────┐
-              │  Self-hosted Linux agent (Ubuntu)        │
-              │   • Python 3.11 + Miniconda + Az CLI    │
-              │   • fabric-cicd (pip)                    │
-              │   • In VNet linked to privatelink.fabric │
-              │     .microsoft.com private DNS zone      │
-              │   • Mirrors Fabric runtime YML so wheels  │
-              │     resolve against the same conda graph │
+              │  Self-hosted Ubuntu agent VM (in VNet    │
+              │  linked to the workspace's PE DNS zone)  │
+              │   - pip download (cp311/manylinux)       │
+              │   - fabric-cicd                          │
+              │   - az cli (federated token)             │
               └─────────────────────────┬────────────────┘
-                                        │ REST (UAMI token via WIF)
-                                        │ to <wsid>.zfc.w.api.fabric...
+                                        │ HTTPS via private FQDN
                                         ▼
               ┌──────────────────────────────────────────┐
-              │  Private Endpoint (workspace-level PL)   │
-              │   • 5 sub-resources (w/api, c, onelake,  │
-              │     dfs, blob) → 10.2.0.11..13/4/5       │
-              │   • Inbound policy: only this PE allowed │
+              │  Workspace Private Endpoint              │
+              │  fc5...zfc.w.api.fabric.microsoft.com    │
               └─────────────────────────┬────────────────┘
                                         │
                                         ▼
-   ┌────────────────────────────────────────────────────────────┐
-   │  Fabric workspace  (DEP + WSPL, no pypi.org egress,        │
-   │   public api.fabric.microsoft.com BLOCKED inbound)         │
-   │  Folder: 16_presidio                                       │
-   │   ├── Presidio  (Environment)                              │
-   │   │     ├── Sparkcompute.yml  → runtime 1.3 / Spark 3.5    │
-   │   │     └── Libraries/                                     │
-   │   │          ├── environment.yml  (public PyPI list)       │
-   │   │          └── CustomLibraries/  ← pre-downloaded wheels │
-   │   └── PresidioSmokeTest  (Notebook, attached to env above) │
-   └────────────────────────────────────────────────────────────┘
+   ┌────────────────────────────────────────────────────────────────────┐
+   │  Fabric workspace (WSPL inbound + DEP outbound)                    │
+   │   16_presidio/                                                     │
+   │     ├── PresidioPriv.Environment                                   │
+   │     │     ├── Setting/Sparkcompute.yml    (runtime 1.3 / Spark 3.5)│
+   │     │     └── Libraries/                                           │
+   │     │           ├── environment.yml       (uploaded then DELETED   │
+   │     │           │                          from staging by         │
+   │     │           │                          deploy.py before publish)│
+   │     │           └── CustomLibraries/      (53 wheels uploaded by   │
+   │     │                                      fabric-cicd)            │
+   │     └── PresidioSmokeTest.Notebook        (attached to env above)  │
+   └────────────────────────────────────────────────────────────────────┘
+```
+
+## The key insight: clear `environment.yml` before publish
+
+In a WSPL/DEP workspace, pypi.org and conda-forge are unreachable from the
+Fabric publish backend. Any `environment.yml` with public dependencies
+(including the seemingly innocent `python=3.11` and `pip` defaults that
+fabric-cicd adds) makes the publish fail silently with
+`sparkLibraries.state: "Failed"` — Fabric's API exposes no error message.
+
+Workspace storage (where `CustomLibraries/` lives) IS reachable via WSPL,
+so wheels uploaded there install fine — provided we stop Fabric from
+trying to resolve the public deps section at all.
+
+`deploy.py` monkey-patches `fabric_cicd._items._environment` to call:
+
+```
+DELETE /v1/workspaces/{wsid}/environments/{eid}/staging/libraries?libraryToDelete=environment.yml
+```
+
+right after fabric-cicd uploads the definition and right before it
+triggers publish. Net effect: staging ends up with `environmentYml: ""`
+plus the wheels — the same state a manually-created working env shows.
+
+Verify after a run from inside the VNet:
+
+```bash
+az rest --method get --resource https://api.fabric.microsoft.com \
+  --url "https://<wsid>.zfc.w.api.fabric.microsoft.com/v1/workspaces/<wsid>/environments/<eid>/staging/libraries"
+# Expect:
+# { "customLibraries": { "wheelFiles": [...] }, "environmentYml": "" }
 ```
 
 ## Repo layout
 
 ```
 .
-├── azure-pipelines.yml             # ADO pipeline definition (Linux)
-├── deploy.py                       # fabric-cicd entry point
-├── requirements-deploy.txt         # fabric-cicd + azure-identity (agent)
-├── requirements-presidio.txt       # Presidio deltas (no runtime dups)
+├── azure-pipelines.yml             # ADO pipeline (Linux demand, manylinux pip download)
+├── deploy.py                       # fabric-cicd entry point + monkey-patch
+├── requirements-deploy.txt         # fabric-cicd + azure-identity (agent-side)
+├── requirements-presidio.txt       # Presidio + spaCy model
+├── infra/
+│   └── agent-vm.bicep              # Bicep for the Ubuntu ADO agent VM
 ├── scripts/
-│   ├── setup-agent.sh              # bootstrap an Ubuntu ADO agent
-│   └── setup-agent.ps1             # legacy: Windows ADO agent
+│   ├── setup-agent.sh              # Bootstrap the Ubuntu agent VM
+│   └── setup-agent.ps1             # (legacy) Windows agent bootstrap
 └── workspace/
     ├── parameter.yml               # fabric-cicd find_replace / spark_pool
     └── 16_presidio/
@@ -72,8 +101,8 @@ anonymization) into a Microsoft Fabric **Environment** item using
         │   ├── .platform
         │   ├── Setting/Sparkcompute.yml
         │   └── Libraries/
-        │       ├── environment.yml          # conda only (python, pip)
-        │       └── CustomLibraries/         # wheels populated by pipeline
+        │       ├── environment.yml          # placeholder (cleared from staging)
+        │       └── CustomLibraries/         # populated by pipeline
         └── PresidioSmokeTest.Notebook/
             ├── .platform
             └── notebook-content.py
@@ -81,129 +110,56 @@ anonymization) into a Microsoft Fabric **Environment** item using
 
 ## One-time setup
 
-### 1. Azure DevOps project
-Already created via `az devops project create`:
-<https://dev.azure.com/renebremer/test-presidio-cicd-privenv>
+### 1. Provision the agent VM
 
-### 2. Self-hosted Linux agent
+```powershell
+az deployment group create `
+  --resource-group <agent-rg> `
+  --template-file infra/agent-vm.bicep `
+  --parameters adminUsername='<user>' `
+  --parameters adminPassword='<password>' `
+  --parameters vnetResourceGroup='<vnet-rg>'
+```
 
-Spin up an **Ubuntu 22.04 VM** in the same VNet as the workspace's Private
-Endpoint (so it inherits the `privatelink.fabric.microsoft.com` private DNS
-zone link). The agent only needs the bootstrap script — pipeline runs
-`checkout: self` to fetch the repo on each run, so don't clone it on the
-VM.
+The VM lands on a subnet in the same VNet as the workspace's PE DNS zone
+(`privatelink.fabric.microsoft.com`), so the WSPL FQDN resolves to the
+private IP. Defaults: `Standard_B4ms`, Ubuntu 22.04.
 
-Copy `scripts/setup-agent.sh` to the VM (e.g. via `scp` from your dev box)
-and run it with a PAT scoped to *Agent Pools (Read & manage)*:
+### 2. Register the agent
 
 ```bash
-# From your dev box:
-scp scripts/setup-agent.sh azureuser@<vm-ip>:~/
-
-# On the Ubuntu VM:
-chmod +x setup-agent.sh
-ORG_URL=https://dev.azure.com/renebremer PAT=<pat> ./setup-agent.sh
+# On the VM (sudoer):
+git clone https://dev.azure.com/<org>/<project>/_git/<repo>
+cd <repo>
+ORG_URL=https://dev.azure.com/<org> PAT=<pat-with-Agent-Pools-rw> ./scripts/setup-agent.sh
 ```
 
-The script installs apt build tools, Miniconda, the Azure CLI, and the ADO
-agent (registered in pool `Default` as a systemd service running under the
-current user so conda is on PATH). After it finishes, revoke the PAT — the
-agent has its own per-agent OAuth token.
+Installs build deps, Azure CLI, and the ADO agent (v3.243.1) as a systemd
+service in pool `Default`. Revoke the PAT once the agent shows online.
 
-> **Why Linux?** Microsoft's [DEP library docs](https://learn.microsoft.com/fabric/data-engineering/environment-manage-library-with-outbound-access-protection#prerequisites)
-> require building wheels in a Linux conda env that mirrors the Fabric Spark
-> runtime image. Resolving on Windows produces wheels that conflict with the
-> Linux runtime and the publish fails silently.
->
-> The legacy `scripts/setup-agent.ps1` is kept for the (non-DEP) public
-> workspace path.
+### 3. Service connection (UAMI + WIF, no secrets)
 
-### 3. Service connection
-Project Settings → **Service connections** → *Azure Resource Manager*
-(workload-identity preferred). Any subscription in the right Entra tenant
-works; the SPN is what matters. Grant that SPN **Contributor** on the
-Fabric workspace (sufficient to create/update Environment & Notebook items),
-and ensure the tenant setting *"Service principals can use Fabric APIs"* is
-enabled.
+WSPL inbound policies validate the caller via the `xms_mirid` claim, which
+only managed identities carry. Plain SPN tokens are rejected.
+
+1. Create a UAMI in any RG of the right tenant.
+2. Add it as **Contributor** on the Fabric workspace.
+3. ADO → Project Settings → **Service connections** → *Azure Resource
+   Manager* → **Workload Identity federation (manual)**. Bind the
+   federated credential to the UAMI.
 
 ### 4. Pipeline variables
-Pipelines → `deploy-presidio-fabric` → **Edit → Variables** (or a Library
-variable group):
 
-| Name | Example |
+Pipelines → `deploy-presidio-fabric` → **Edit → Variables**:
+
+| Name | Value |
 |---|---|
 | `AZURE_SERVICE_CONNECTION` | `<service-connection-name>` |
-| `FABRIC_WORKSPACE_ID`      | `601bdd88-8a8d-0805-a3b1-af6b6b2d1b17` (testpriv) |
+| `FABRIC_WORKSPACE_ID`      | `fc5a31aa-23f6-4a07-9b8b-8df04c70facd` |
+| `FABRIC_BASE_API_URL`      | `https://<wsid-no-dashes>.zfc.w.api.fabric.microsoft.com` |
 | `FABRIC_ENVIRONMENT`       | `PPE` |
 
-## Run it
-
-`git push` to `main` → pipeline triggers automatically (or click **Run pipeline**).
-
-The Environment publish is a long-running operation (~10-20 minutes);
-fabric-cicd polls the staging endpoint until it completes.
-
-## Move to the DEP private workspace
-
-`pypi.org` is unreachable from inside a DEP-protected workspace, so the
-Fabric Environment publish cannot resolve any `pip:` deps itself. Per
-[Microsoft's documented workflow](https://learn.microsoft.com/fabric/data-engineering/environment-manage-library-with-outbound-access-protection),
-wheels must be **built against an exact replica of the Fabric runtime conda
-env** so they don't conflict with packages already in the runtime image.
-The pipeline does this automatically:
-
-1. Downloads `Fabric-Python311-CPU.yml` from
-   [microsoft/synapse-spark-runtime](https://github.com/microsoft/synapse-spark-runtime/tree/main/Fabric).
-2. Strips the Microsoft-private packages (`notebookutils`,
-   `semantic-link-sempy`, `synapseml*`, etc.) that pip can't resolve.
-3. `conda env create -n fabric-env -f <yml>` — mirrors the runtime image.
-4. `pip download -r requirements-presidio.txt -d CustomLibraries/` resolves
-   only the deltas; transitives that already ship with the runtime are
-   intentionally *not* listed in `requirements-presidio.txt` and are *not*
-   uploaded.
-5. `Libraries/environment.yml` is conda-only (`python=3.11`, `pip`) — no
-   `pip:` block — so Fabric never tries to call out to pypi.org.
-6. fabric-cicd uploads the resulting wheels with the rest of the
-   Environment definition; Fabric installs them from `CustomLibraries/`.
-
-Wheels are produced fresh per pipeline run and excluded from git via
-`.gitignore`. To bump versions, edit `requirements-presidio.txt` and push.
-
-## Deploy to a workspace reachable only via Private Link
-
-If the target workspace has a **Workspace-level Private Link (WSPL)** and the
-public Fabric endpoint is blocked by an inbound communication policy, you'll
-hit:
-
-```
-Request denied due to inbound communication policy
-```
-
-Fabric requires that REST calls hit the workspace's **dedicated FQDN** so the
-PE can authorize them. fabric-cicd's default base URL
-(`https://api.fabric.microsoft.com`) won't satisfy that; it has to be
-overridden per workspace.
-
-### 1. Use a User-Assigned Managed Identity (recommended)
-
-A WSPL inbound policy validates the caller via the `xms_mirid` claim, which
-only managed identities carry. Plain SPN tokens are rejected. UAMI also
-removes the need to manage a client secret.
-
-1. Create a UAMI (e.g. `fabric-cicd-uami`) in any RG of the right tenant.
-2. Add it as **Contributor** on the Fabric workspace.
-3. In ADO → Project Settings → **Service connections** → *New* →
-   *Azure Resource Manager* → **Workload Identity federation (manual)**, and
-   bind the federated credential to the UAMI (Subject identifier:
-   `sc://<org>/<project>/<connection-name>`, Issuer:
-   `https://vstoken.dev.azure.com/<org-guid>`).
-4. Reference that connection from `azure-pipelines.yml` (`AzureCLI@2` task
-   with `addSpnToEnvironment: true`). The Az CLI inside the task will mint
-   tokens via WIF — no secrets stored anywhere.
-
-### 2. Discover the workspace's private FQDN
-
-Each workspace's PE exposes 5 sub-resources. Get them from the PE NIC:
+### 5. Discover the workspace's private FQDN
 
 ```powershell
 $peId = (az network private-endpoint show -g <pe-rg> -n <pe-name> --query id -o tsv)
@@ -212,67 +168,38 @@ az resource show --ids $nic `
   --query "properties.ipConfigurations[].{name:name, fqdns:properties.privateLinkConnectionProperties.fqdns, ip:properties.privateIPAddress}" -o json
 ```
 
-The control-plane FQDN you need is the `…zfc.w.api.fabric.microsoft.com`
-record (e.g. `fc5a31aa23f64a079b8b8df04c70facd.zfc.w.api.fabric.microsoft.com`
-→ `10.2.0.11`). The other four (`c`, `onelake`, `dfs`, `blob`) are for the
-runtime and OneLake.
+Use the `…zfc.w.api.fabric.microsoft.com` record for `FABRIC_BASE_API_URL`.
 
-### 3. Make the agent resolve that FQDN privately
+## Run it
 
-The Private DNS zone `privatelink.fabric.microsoft.com` (auto-created in the
-PE's RG) holds A-records for all 5 FQDNs. The agent VM's VNet must be linked
-to that zone:
-
-```powershell
-az network private-dns link vnet list -g <zone-rg> -z privatelink.fabric.microsoft.com -o table
-# If your agent VNet isn't listed, add a link:
-az network private-dns link vnet create -g <zone-rg> -z privatelink.fabric.microsoft.com `
-  -n <link-name> -v <agent-vnet-id> -e false
-```
-
-Verify from the agent VM:
-
-```powershell
-ipconfig /flushdns; Clear-DnsClientCache
-Resolve-DnsName fc5a31aa23f64a079b8b8df04c70facd.zfc.w.api.fabric.microsoft.com
-# → must return the private IP (e.g. 10.2.0.11), not a public 40.x.x.x
-```
-
-### 4. Point fabric-cicd at the workspace FQDN
-
-Add a single pipeline variable (Pipelines → `deploy-presidio-fabric` → Edit →
-Variables → New):
-
-| Name | Value |
-|---|---|
-| `FABRIC_BASE_API_URL` | `https://<workspace-id-no-dashes>.zfc.w.api.fabric.microsoft.com` |
-
-`deploy.py` reads it and overrides
-`fabric_cicd.constants.DEFAULT_API_ROOT_URL` before constructing
-`FabricWorkspace`. No code change needed.
-
-### 5. Outbound egress required from the agent
-
-Only HTTPS to:
-
-- `https://dev.azure.com/<org>` (ADO control plane)
-- `https://login.microsoftonline.com` (token endpoint, public)
-- `https://<workspace-id>.zfc.w.api.fabric.microsoft.com` (private IP via PE)
-- `https://login.windows.net` for federated token exchange (WIF)
-
-The public `api.fabric.microsoft.com` is **not** required — and shouldn't be
-reachable if the inbound policy is doing its job.
+`git push` to `main` → pipeline triggers automatically. The Environment
+publish is a long-running operation (~5–15 min for the full Presidio
+closure of 53 wheels); fabric-cicd polls until completion.
 
 ## Conflict mitigation
 
-Presidio brings `spacy`, `pydantic`, `regex`, etc. which can clash with the
-Fabric runtime. Mitigations:
+Presidio brings `pydantic`, `spacy`, `regex`, etc. that may overlap with
+the Fabric runtime. Recommendations:
 
-- Pin exact versions (already done in `environment.yml`).
-- Keep this `Presidio` environment dedicated; attach it only to notebooks
-  that need PII detection — don't make it the workspace default.
-- If a clash surfaces at runtime, vendor the conflicting package into
-  `CustomLibraries/` at a compatible version.
+- Pin exact versions in `requirements-presidio.txt`.
+- Keep this environment dedicated; attach it only to notebooks that need
+  PII detection — don't make it the workspace default.
+- If a clash surfaces at runtime, pin the conflicting package down to
+  whatever the Fabric runtime ships and re-publish.
+
+## How this compares to the MS docs pattern
+
+[Outbound access protection for Fabric Environments](https://learn.microsoft.com/fabric/data-engineering/environment-manage-library-with-outbound-access-protection)
+recommends a private Azure Storage account configured as a pip mirror.
+Functionally equivalent to what we do here — wheels live in
+workspace-private storage either way. Differences:
+
+|                              | MS storage-mirror | This repo                |
+|------------------------------|-------------------|--------------------------|
+| Extra Azure infra            | Storage + PE      | None (uses CustomLibraries) |
+| Pip resolves at publish time | Yes, via mirror   | Skipped (env.yml cleared)|
+| Detects missing transitives  | At publish        | Only at notebook runtime |
+| Works with ADO + UAMI/WIF    | Yes               | Yes                      |
 
 ## References
 
@@ -280,3 +207,5 @@ Fabric runtime. Mitigations:
 - Presidio:    <https://microsoft.github.io/presidio/>
 - Fabric Environment + custom libraries:
   <https://learn.microsoft.com/fabric/data-engineering/environment-manage-library>
+- Outbound access protection:
+  <https://learn.microsoft.com/fabric/data-engineering/environment-manage-library-with-outbound-access-protection>
