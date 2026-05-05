@@ -106,17 +106,11 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
     workspace_guid = fabric_workspace_obj.workspace_id
     print(f"  binding to environmentId={env_guid} workspaceId={workspace_guid}")
 
-    # Check env publish state -- Fabric will silently drop a notebook
-    # binding to an env whose libraries publish hasn't completed.
-    try:
-        st_url = f"{fabric_workspace_obj.base_api_url}/environments/{env_guid}/libraries"
-        st_resp = fabric_workspace_obj.endpoint.invoke(method="GET", url=st_url)
-        print(f"  env libraries: {st_resp.get('body', st_resp)}")
-        st_url2 = f"{fabric_workspace_obj.base_api_url}/environments/{env_guid}"
-        st_resp2 = fabric_workspace_obj.endpoint.invoke(method="GET", url=st_url2)
-        print(f"  env metadata: {st_resp2.get('body', st_resp2)}")
-    except Exception as exc:
-        print(f"  WARN: env state check failed: {exc!r}")
+    # Wait for the environment publish to settle. Fabric silently strips
+    # notebook->environment bindings whose target env is mid-publish
+    # (sparkLibraries.state == 'Running'); we must block until it
+    # reaches a terminal state.
+    _wait_for_env_publish(fabric_workspace_obj, env_guid, timeout_s=20 * 60)
 
     nb_dir = Path(nb.path)
     print(f"  source dir: {nb_dir}")
@@ -192,6 +186,35 @@ def _lookup_environment_guid(fabric_workspace_obj, env_name: str) -> str | None:
         if env.get("displayName") == env_name:
             return env.get("id")
     return None
+
+
+def _wait_for_env_publish(fabric_workspace_obj, env_guid: str, timeout_s: int = 1200) -> None:
+    """
+    Poll /environments/{id} until publishDetails.state is terminal.
+    Fabric silently strips notebook->env bindings while a publish is
+    Running, so we must block here before re-binding the notebook.
+    """
+    url = f"{fabric_workspace_obj.base_api_url}/environments/{env_guid}"
+    deadline = time.monotonic() + timeout_s
+    last_state = None
+    while time.monotonic() < deadline:
+        resp = fabric_workspace_obj.endpoint.invoke(method="GET", url=url)
+        body = resp.get("body", {}) if isinstance(resp, dict) else {}
+        details = body.get("properties", {}).get("publishDetails", {}) or {}
+        state = details.get("state")
+        comp = details.get("componentPublishInfo", {}) or {}
+        libs_state = (comp.get("sparkLibraries") or {}).get("state")
+        settings_state = (comp.get("sparkSettings") or {}).get("state")
+        if state != last_state:
+            print(f"  env publish state={state} sparkLibraries={libs_state} sparkSettings={settings_state}")
+            last_state = state
+        if state in ("Success", None) and libs_state in ("Success", None):
+            print("  env publish settled")
+            return
+        if state in ("Failed", "Cancelled"):
+            raise RuntimeError(f"Environment publish ended in state={state} ({details})")
+        time.sleep(20)
+    raise RuntimeError(f"Timed out waiting {timeout_s}s for env publish to settle (last state={last_state})")
 
 
 def _rewrite_env_binding(content: str, env_guid: str, workspace_guid: str) -> str:
