@@ -23,21 +23,6 @@
 
 # CELL ********************
 
-# tldextract (transitive dep of presidio-analyzer's URL recognizer) tries
-# to refresh the public-suffix list from publicsuffix.org on first use.
-# DEP outbound blocks that, raising ConnectionError. Disable the network
-# fetch on (a) the module-level singleton `tldextract.extract` (already
-# constructed at import time) and (b) any new TLDExtract instance.
-import tldextract as _tld
-_snapshot_only = _tld.TLDExtract(suffix_list_urls=(), fallback_to_snapshot=True)
-_tld.extract = _snapshot_only
-_orig_init = _tld.TLDExtract.__init__
-def _patched_init(self, *args, **kwargs):
-    kwargs["suffix_list_urls"] = ()
-    kwargs["fallback_to_snapshot"] = True
-    _orig_init(self, *args, **kwargs)
-_tld.TLDExtract.__init__ = _patched_init
-
 import importlib.metadata as ilmd
 import presidio_analyzer  # noqa: F401
 import presidio_anonymizer  # noqa: F401
@@ -72,6 +57,12 @@ nlp_engine = NlpEngineProvider(nlp_configuration={
 }).create_engine()
 
 analyzer = AnalyzerEngine(nlp_engine=nlp_engine, supported_languages=["en"])
+
+# UrlRecognizer pulls the public suffix list from publicsuffix.org via
+# tldextract on first use, which DEP outbound blocks. We don't need URL
+# detection for this smoke test, so remove it.
+analyzer.registry.remove_recognizer("UrlRecognizer")
+
 results = analyzer.analyze(text=text, language="en")
 
 for r in results:
