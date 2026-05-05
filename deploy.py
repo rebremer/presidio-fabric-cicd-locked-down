@@ -106,6 +106,18 @@ def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> Non
     workspace_guid = fabric_workspace_obj.workspace_id
     print(f"  binding to environmentId={env_guid} workspaceId={workspace_guid}")
 
+    # Check env publish state -- Fabric will silently drop a notebook
+    # binding to an env whose libraries publish hasn't completed.
+    try:
+        st_url = f"{fabric_workspace_obj.base_api_url}/environments/{env_guid}/libraries"
+        st_resp = fabric_workspace_obj.endpoint.invoke(method="GET", url=st_url)
+        print(f"  env libraries: {st_resp.get('body', st_resp)}")
+        st_url2 = f"{fabric_workspace_obj.base_api_url}/environments/{env_guid}"
+        st_resp2 = fabric_workspace_obj.endpoint.invoke(method="GET", url=st_url2)
+        print(f"  env metadata: {st_resp2.get('body', st_resp2)}")
+    except Exception as exc:
+        print(f"  WARN: env state check failed: {exc!r}")
+
     nb_dir = Path(nb.path)
     print(f"  source dir: {nb_dir}")
     parts = []
