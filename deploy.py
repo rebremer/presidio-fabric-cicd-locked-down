@@ -21,7 +21,7 @@ resolves to AzureCliCredential -- no client secret stored anywhere (WIF).
 
 from __future__ import annotations
 
-import base64  # noqa: F401  (kept for future definition-level workarounds)
+import base64
 import os
 import time
 from pathlib import Path
@@ -70,42 +70,153 @@ def _patch_clear_environment_yml() -> None:
     _env_mod._publish_environment_metadata = patched
 
 
-def _set_workspace_default_environment(fabric_workspace_obj, env_name: str) -> None:
+def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> None:
     """
-    Set `env_name` as the workspace default Spark environment via
-    PATCH /workspaces/{id}/spark/settings. Notebooks attached to
-    "Workspace default" then inherit this environment automatically.
+    Re-POST the notebook's source-controlled definition through the
+    notebook-specific updateDefinition endpoint. This is a workaround for
+    fabric-cicd 1.0 publishing notebooks via the generic /items endpoint,
+    which drops the `# META "dependencies": { "environment": {...} }`
+    block from notebook-content.py and leaves the notebook attached to
+    the workspace's default environment.
 
-    Why this instead of binding the notebook directly: Fabric's public
-    REST `notebooks/{id}/updateDefinition` for fabricGitSource format
-    silently strips the `# META "dependencies": { "environment": {...} }`
-    block from notebook-content.py. Per-notebook bindings can only be
-    set via internal portal APIs. Setting the workspace default is the
-    documented, supported path for governed shared workloads.
-
-    Caller (SP/UAMI) must have workspace Admin role; Member is not
-    sufficient for /spark/settings.
+    Also rewrites the dependencies block so the env GUID is whatever the
+    'PresidioPriv' env actually has in the target workspace right now,
+    because Fabric silently strips dependencies that point at a
+    non-existent environmentId.
     """
-    print(f"==> Setting '{env_name}' as workspace default Spark environment")
-    env_guid = _lookup_environment_guid(fabric_workspace_obj, env_name)
-    if not env_guid:
-        print(f"  WARN: env '{env_name}' not found in workspace; skipping")
+    print(f"==> Force-binding notebook '{notebook_name}' to its declared environment")
+    repo_items = fabric_workspace_obj.repository_items
+    nb = repo_items.get(ItemType.NOTEBOOK.value, {}).get(notebook_name)
+    if nb is None:
+        print(f"  WARN: notebook '{notebook_name}' not in repository_items; skipping")
         return
+    if not nb.guid:
+        print(f"  WARN: notebook '{notebook_name}' has no deployed guid; skipping")
+        return
+
+    env_item = repo_items.get(ItemType.ENVIRONMENT.value, {}).get("PresidioPriv")
+    if env_item is None or not env_item.guid:
+        # Notebook-only redeploy: env item isn't in scope. Look it up via REST.
+        env_guid = _lookup_environment_guid(fabric_workspace_obj, "PresidioPriv")
+    else:
+        env_guid = env_item.guid
+    if not env_guid:
+        print("  WARN: could not resolve PresidioPriv env guid; skipping force-bind")
+        return
+    workspace_guid = fabric_workspace_obj.workspace_id
+    print(f"  binding to environmentId={env_guid} workspaceId={workspace_guid}")
+
+    # Cancel any running notebook jobs/sessions on this notebook -- a
+    # live Spark session pins the notebook definition and silently
+    # rejects subsequent updateDefinition calls (Fabric portal has the
+    # same constraint: env binding can only be changed after the
+    # session is stopped).
+    _cancel_running_notebook_jobs(fabric_workspace_obj, nb.guid)
+
+    # Wait for the environment publish to settle. Fabric silently strips
+    # notebook->environment bindings whose target env is mid-publish
+    # (sparkLibraries.state == 'Running'); we must block until it
+    # reaches a terminal state.
     _wait_for_env_publish(fabric_workspace_obj, env_guid, timeout_s=20 * 60)
 
-    url = f"{fabric_workspace_obj.base_api_url}/spark/settings"
-    body = {"environment": {"name": env_name}}
-    print(f"  PATCH {url} body={body}")
+    nb_dir = Path(nb.path)
+    print(f"  source dir: {nb_dir}")
+    parts = []
+    # Only re-POST notebook-content.py (which carries the dependencies
+    # block in its `# META` header). Including .platform with
+    # updateMetadata=True caused Fabric to overwrite the env binding
+    # because .platform has no dependencies field.
+    fname = "notebook-content.py"
+    fpath = nb_dir / fname
+    if not fpath.exists():
+        print(f"  WARN: {fpath} missing; cannot force-bind")
+        return
+    raw = fpath.read_bytes()
+    txt = raw.decode("utf-8")
+    txt = _rewrite_env_binding(txt, env_guid, workspace_guid)
+    raw = txt.encode("utf-8")
+    has_dep = '"dependencies"' in txt and '"environment"' in txt
+    print(f"  rewrote env binding in {fname} ({len(raw)} bytes); dep block present: {has_dep}")
+    print("  ----- outgoing notebook-content.py header (first 14 lines) -----")
+    print("\n".join(txt.splitlines()[:14]))
+    print("  ---------------------------------------------------------------")
+    parts.append({
+        "path": fname,
+        "payload": base64.b64encode(raw).decode("ascii"),
+        "payloadType": "InlineBase64",
+    })
+
+    url = (
+        f"{fabric_workspace_obj.base_api_url}/notebooks/{nb.guid}"
+        f"/updateDefinition"
+    )
+    body = {"definition": {"format": "fabricGitSource", "parts": parts}}
+    print(f"  POST {url}")
     try:
-        resp = fabric_workspace_obj.endpoint.invoke(method="PATCH", url=url, body=body)
-        status = resp.get("status_code", "?") if isinstance(resp, dict) else resp
-        body_out = resp.get("body", {}) if isinstance(resp, dict) else {}
-        print(f"  status_code: {status}")
-        print(f"  workspace spark settings.environment: {body_out.get('environment')}")
+        resp = fabric_workspace_obj.endpoint.invoke(method="POST", url=url, body=body)
+        print(f"  status_code: {resp.get('status_code', '?') if isinstance(resp, dict) else resp}")
     except Exception as exc:
-        print(f"  ERROR setting workspace default environment: {exc!r}")
-        print("  HINT: the deploying identity must have workspace Admin role.")
+        print(f"  ERROR forcing notebook env binding: {exc!r}")
         raise
+    time.sleep(5)
+
+    # Read the published notebook back so we can confirm what Fabric
+    # actually stored (the portal can be misleading about env binding).
+    get_url = f"{fabric_workspace_obj.base_api_url}/notebooks/{nb.guid}/getDefinition"
+    print(f"  POST {get_url}")
+    try:
+        getd = fabric_workspace_obj.endpoint.invoke(method="POST", url=get_url, body={})
+        body_obj = getd.get("body", {}) if isinstance(getd, dict) else {}
+        parts_out = body_obj.get("definition", {}).get("parts", [])
+        for p in parts_out:
+            if p.get("path") == "notebook-content.py":
+                content = base64.b64decode(p["payload"]).decode("utf-8", errors="replace")
+                head = "\n".join(content.splitlines()[:20])
+                print("  ----- deployed notebook-content.py (first 20 lines) -----")
+                print(head)
+                print("  ---------------------------------------------------------")
+                has_env = '"environmentId"' in content
+                print(f"  deployed notebook contains environmentId: {has_env}")
+                if not has_env:
+                    raise RuntimeError(
+                        "Fabric stripped the environment binding from the notebook "
+                        "definition on save. The referenced environmentId likely "
+                        "does not exist in the target workspace."
+                    )
+    except Exception as exc:
+        print(f"  ERROR verifying notebook env binding: {exc!r}")
+        raise
+
+
+def _cancel_running_notebook_jobs(fabric_workspace_obj, notebook_guid: str) -> None:
+    """
+    List job instances for the notebook and cancel any in non-terminal
+    state. Fabric pins notebook definition while a Spark session is
+    active, so updateDefinition silently no-ops until the session ends.
+    """
+    list_url = f"{fabric_workspace_obj.base_api_url}/items/{notebook_guid}/jobs/instances"
+    try:
+        resp = fabric_workspace_obj.endpoint.invoke(method="GET", url=list_url)
+    except Exception as exc:
+        print(f"  WARN: could not list notebook jobs: {exc!r}")
+        return
+    body = resp.get("body", {}) if isinstance(resp, dict) else {}
+    instances = body.get("value", [])
+    active = [i for i in instances if i.get("status") in ("InProgress", "NotStarted")]
+    if not active:
+        print("  no active notebook jobs to cancel")
+        return
+    print(f"  cancelling {len(active)} active notebook job(s)")
+    for inst in active:
+        inst_id = inst.get("id")
+        cancel_url = f"{fabric_workspace_obj.base_api_url}/items/{notebook_guid}/jobs/instances/{inst_id}/cancel"
+        try:
+            fabric_workspace_obj.endpoint.invoke(method="POST", url=cancel_url, body={})
+            print(f"    cancelled {inst_id}")
+        except Exception as exc:
+            print(f"    WARN: could not cancel {inst_id}: {exc!r}")
+    # Brief settle so the cancel takes effect before we updateDefinition.
+    time.sleep(15)
 
 
 def _lookup_environment_guid(fabric_workspace_obj, env_name: str) -> str | None:
@@ -122,7 +233,8 @@ def _lookup_environment_guid(fabric_workspace_obj, env_name: str) -> str | None:
 def _wait_for_env_publish(fabric_workspace_obj, env_guid: str, timeout_s: int = 1200) -> None:
     """
     Poll /environments/{id} until publishDetails.state is terminal.
-    Workspace default cannot be pointed at an env mid-publish.
+    Fabric silently strips notebook->env bindings while a publish is
+    Running, so we must block here before re-binding the notebook.
     """
     url = f"{fabric_workspace_obj.base_api_url}/environments/{env_guid}"
     deadline = time.monotonic() + timeout_s
@@ -145,6 +257,28 @@ def _wait_for_env_publish(fabric_workspace_obj, env_guid: str, timeout_s: int = 
             raise RuntimeError(f"Environment publish ended in state={state} ({details})")
         time.sleep(20)
     raise RuntimeError(f"Timed out waiting {timeout_s}s for env publish to settle (last state={last_state})")
+
+
+def _rewrite_env_binding(content: str, env_guid: str, workspace_guid: str) -> str:
+    """
+    Replace any existing `# META "environmentId": "..."` and
+    `# META "workspaceId": "..."` lines in the notebook header with the
+    resolved guids. Assumes the source already has a dependencies block
+    (this repo's PresidioSmokeTest notebook does).
+    """
+    import re
+
+    content = re.sub(
+        r'(# META\s+"environmentId":\s*")[^"]*(")',
+        rf"\g<1>{env_guid}\g<2>",
+        content,
+    )
+    content = re.sub(
+        r'(# META\s+"workspaceId":\s*")[^"]*(")',
+        rf"\g<1>{workspace_guid}\g<2>",
+        content,
+    )
+    return content
 
 
 def main() -> None:
@@ -186,17 +320,14 @@ def main() -> None:
 
     publish_all_items(target_workspace)
 
-    # Bind the notebook to PresidioPriv via the workspace default
-    # environment (PATCH /workspaces/{id}/spark/settings). The
-    # public REST updateDefinition endpoint silently strips the
-    # `# META "dependencies"` block from notebook-content.py for
-    # fabricGitSource format -- only the Fabric portal can set a
-    # per-notebook env binding via internal APIs. Setting the
-    # workspace default makes any notebook attached to "Workspace
-    # default" pick up PresidioPriv automatically; this is the
-    # supported path for governed envs and is also what Microsoft
-    # docs recommend for shared workloads.
-    _set_workspace_default_environment(target_workspace, "PresidioPriv")
+    # Force the notebook's environment binding via the notebook-specific
+    # REST endpoint. fabric-cicd publishes notebooks via the generic
+    # /items endpoint which appears to drop the `# META "dependencies"`
+    # block from notebook-content.py, leaving the notebook attached to
+    # the workspace's default (i.e. no) environment. Re-POST the same
+    # definition through the notebook-specific updateDefinition endpoint
+    # which preserves it.
+    _force_notebook_env_binding(target_workspace, "PresidioSmokeTest")
 
     # Only unpublish items that we own (safety guard:
     # do not touch unrelated items if scope is widened later).
