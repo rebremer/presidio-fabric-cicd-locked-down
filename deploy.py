@@ -1,22 +1,29 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-
 """
 Deploy the Presidio Fabric Environment + smoke-test notebook to a
-WSPL/DEP-protected Fabric workspace using the fabric-cicd library
+WSPL/DEP-protected Fabric workspace using fabric-cicd
 (https://microsoft.github.io/fabric-cicd/).
 
-Run from an Azure DevOps agent that has line-of-sight to the workspace's
-private FQDN, after `pip install -r requirements-deploy.txt`.
+Two surgical workarounds layered on top of vanilla fabric-cicd:
 
-Required environment variables:
-  FABRIC_WORKSPACE_ID   GUID of the target workspace
-  FABRIC_ENVIRONMENT    Logical environment name used in parameter.yml (e.g. 'PPE')
-  FABRIC_BASE_API_URL   https://<wsid-no-dashes>.zfc.w.api.fabric.microsoft.com
+  1. Clear `environment.yml` from staging before publish. In
+     WSPL/DEP workspaces pypi.org/conda-forge are unreachable; the
+     only env state that publishes is `environmentYml: ""` plus the
+     wheels under `CustomLibraries/`.
+  2. Re-bind the notebook to PresidioPriv via an `ipynb`-format
+     round-trip on `notebooks/{id}/updateDefinition`. fabric-cicd
+     publishes notebooks in `fabricGitSource` format, on which
+     Fabric silently strips `metadata.dependencies.environment`;
+     the `ipynb` format preserves it (same path
+     `notebookutils.notebook.updateDefinition` uses internally).
 
-Auth: AzureCLI@2 (with addSpnToEnvironment: true) sets AZURE_TENANT_ID and
-AZURE_CLIENT_ID and leaves an authenticated `az` session. DefaultAzureCredential
-resolves to AzureCliCredential -- no client secret stored anywhere (WIF).
+Required env: FABRIC_WORKSPACE_ID, FABRIC_BASE_API_URL,
+optional: FABRIC_ENVIRONMENT (default 'PPE'), FABRIC_ITEM_TYPES
+(default 'Environment,Notebook'), FABRIC_DEBUG.
+
+Auth: DefaultAzureCredential -> AzureCliCredential, federated via
+AzureCLI@2 (WIF, no secrets stored).
 """
 
 from __future__ import annotations
@@ -39,271 +46,145 @@ from fabric_cicd import constants as fabric_constants
 from fabric_cicd._items import _environment as _env_mod
 from fabric_cicd.constants import ItemType
 
+ENV_NAME = "PresidioPriv"
+NOTEBOOK_NAME = "PresidioSmokeTest"
+
+
+def _invoke(ws, method, url, body=None):
+    resp = ws.endpoint.invoke(method=method, url=url, body=body if body is not None else {})
+    return resp.get("body", {}) if isinstance(resp, dict) else {}
+
 
 def _patch_clear_environment_yml() -> None:
-    """
-    Monkey-patch fabric-cicd to clear `environment.yml` from staging/libraries
-    BEFORE triggering publish.
-
-    Why: in WSPL/DEP-locked workspaces, Fabric's publish backend cannot resolve
-    public conda/pip dependencies (pypi.org and conda-forge are blocked). The
-    only state that publishes successfully is `environmentYml: ""` (verified
-    against a manually-created working env). fabric-cicd uploads environment.yml
-    as a definition part and the API rejects empty payload, so we delete it
-    server-side after upload but before publish.
-    """
+    """Delete environment.yml from staging right before publish (workaround #1)."""
     original = _env_mod._publish_environment_metadata
 
-    def patched(fabric_workspace_obj, item_name):
-        item_guid = fabric_workspace_obj.repository_items[ItemType.ENVIRONMENT.value][item_name].guid
+    def patched(ws, item_name):
+        guid = ws.repository_items[ItemType.ENVIRONMENT.value][item_name].guid
         url = (
-            f"{fabric_workspace_obj.base_api_url}/environments/{item_guid}"
+            f"{ws.base_api_url}/environments/{guid}"
             f"/staging/libraries?libraryToDelete=environment.yml"
         )
         try:
-            fabric_workspace_obj.endpoint.invoke(method="DELETE", url=url)
-            print(f"  Cleared environment.yml from staging/libraries for '{item_name}'")
+            _invoke(ws, "DELETE", url)
+            print(f"  cleared environment.yml from staging for '{item_name}'")
         except Exception as exc:
-            # Non-fatal: if there was no environment.yml staged, the API may 404.
-            print(f"  Warning: could not delete staged environment.yml for '{item_name}': {exc}")
-        return original(fabric_workspace_obj, item_name)
+            print(f"  warn: could not delete staged environment.yml: {exc}")
+        return original(ws, item_name)
 
     _env_mod._publish_environment_metadata = patched
 
 
-def _force_notebook_env_binding(fabric_workspace_obj, notebook_name: str) -> None:
-    """
-    Force the notebook's environment binding by round-tripping the
-    notebook definition in **ipynb** format.
-
-    Why: when fabric-cicd publishes a notebook it uses the
-    `fabricGitSource` format (the .py-with-`# META`-headers source-
-    control format). On that format Fabric's REST `updateDefinition`
-    silently strips the `"dependencies": { "environment": {...} }`
-    block, so the notebook ends up unbound (= using Workspace default).
-    The `ipynb` format does not have that bug -- it is the same code
-    path `notebookutils.notebook.updateDefinition` uses to update env
-    and default-lakehouse bindings from inside a running notebook.
-
-    Workflow:
-      1. GET current definition with `?format=ipynb`
-         (the URL param tells Fabric to return the .ipynb part).
-      2. Mutate `metadata.dependencies.environment` with the resolved
-         workspace + env GUIDs.
-      3. POST it back with `"format": "ipynb"` inside the body and
-         the `.ipynb` part path. Do NOT put `?format=ipynb` on the
-         update URL -- on `updateDefinition` the URL param means
-         "convert .py -> .ipynb" and rejects the request.
-
-    No live Spark session needed -- this is a pure metadata update on
-    the notebook artifact.
-    """
-    print(f"==> Force-binding notebook '{notebook_name}' to its declared environment")
-    repo_items = fabric_workspace_obj.repository_items
-    nb = repo_items.get(ItemType.NOTEBOOK.value, {}).get(notebook_name)
-    if nb is None:
-        print(f"  WARN: notebook '{notebook_name}' not in repository_items; skipping")
-        return
-    if not nb.guid:
-        print(f"  WARN: notebook '{notebook_name}' has no deployed guid; skipping")
-        return
-
-    env_item = repo_items.get(ItemType.ENVIRONMENT.value, {}).get("PresidioPriv")
-    if env_item is None or not env_item.guid:
-        # Notebook-only redeploy: env item isn't in scope. Look it up via REST.
-        env_guid = _lookup_environment_guid(fabric_workspace_obj, "PresidioPriv")
-    else:
-        env_guid = env_item.guid
-    if not env_guid:
-        print("  WARN: could not resolve PresidioPriv env guid; skipping force-bind")
-        return
-    workspace_guid = fabric_workspace_obj.workspace_id
-    print(f"  binding to environmentId={env_guid} workspaceId={workspace_guid}")
-
-    # Wait for the environment publish to settle. Fabric rejects a
-    # binding to an env whose publish is still Running.
-    _wait_for_env_publish(fabric_workspace_obj, env_guid, timeout_s=20 * 60)
-
-    # 1. Pull the deployed notebook in ipynb format.
-    get_url = (
-        f"{fabric_workspace_obj.base_api_url}/notebooks/{nb.guid}"
-        f"/getDefinition?format=ipynb"
-    )
-    print(f"  POST {get_url}")
-    try:
-        getd = fabric_workspace_obj.endpoint.invoke(method="POST", url=get_url, body={})
-    except Exception as exc:
-        print(f"  ERROR fetching notebook definition: {exc!r}")
-        raise
-    body_obj = getd.get("body", {}) if isinstance(getd, dict) else {}
-    parts_in = body_obj.get("definition", {}).get("parts", [])
-    ipynb_part = None
-    for p in parts_in:
-        if p.get("path", "").endswith(".ipynb"):
-            ipynb_part = p
-            break
-    if ipynb_part is None:
-        raise RuntimeError(
-            f"getDefinition?format=ipynb returned no .ipynb part "
-            f"(parts: {[p.get('path') for p in parts_in]})"
-        )
-    ipynb_path = ipynb_part["path"]
-    ipynb_bytes = base64.b64decode(ipynb_part["payload"])
-    nb_json = json.loads(ipynb_bytes.decode("utf-8"))
-
-    # 2. Mutate metadata.dependencies.environment.
-    metadata = nb_json.setdefault("metadata", {})
-    deps = metadata.setdefault("dependencies", {})
-    deps["environment"] = {
-        "environmentId": env_guid,
-        "workspaceId": workspace_guid,
-    }
-    print(f"  set metadata.dependencies.environment = {deps['environment']}")
-
-    new_bytes = json.dumps(nb_json, indent=2).encode("utf-8")
-    new_part = {
-        "path": ipynb_path,
-        "payload": base64.b64encode(new_bytes).decode("ascii"),
-        "payloadType": "InlineBase64",
-    }
-
-    # 3. POST it back. Format goes inside the body (same shape as
-    # fabricGitSource); ?format=ipynb on the URL would trigger Fabric's
-    # py->ipynb converter and reject the request.
-    put_url = (
-        f"{fabric_workspace_obj.base_api_url}/notebooks/{nb.guid}"
-        f"/updateDefinition"
-    )
-    body = {"definition": {"format": "ipynb", "parts": [new_part]}}
-    print(f"  POST {put_url}")
-    try:
-        resp = fabric_workspace_obj.endpoint.invoke(method="POST", url=put_url, body=body)
-        status = resp.get("status_code", "?") if isinstance(resp, dict) else resp
-        print(f"  status_code: {status}")
-    except Exception as exc:
-        print(f"  ERROR forcing notebook env binding: {exc!r}")
-        raise
-
-    # 4. Verify by reading back.
-    time.sleep(5)
-    print(f"  POST {get_url} (verify)")
-    verifyd = fabric_workspace_obj.endpoint.invoke(method="POST", url=get_url, body={})
-    vbody = verifyd.get("body", {}) if isinstance(verifyd, dict) else {}
-    vparts = vbody.get("definition", {}).get("parts", [])
-    for p in vparts:
-        if p.get("path", "").endswith(".ipynb"):
-            content = base64.b64decode(p["payload"]).decode("utf-8", errors="replace")
-            try:
-                vjson = json.loads(content)
-                env_after = (
-                    vjson.get("metadata", {})
-                    .get("dependencies", {})
-                    .get("environment", {})
-                )
-            except Exception:
-                env_after = None
-            print(f"  deployed metadata.dependencies.environment: {env_after}")
-            if not env_after or env_after.get("environmentId") != env_guid:
-                raise RuntimeError(
-                    "Fabric did not persist the environment binding (ipynb format). "
-                    f"Expected environmentId={env_guid}, got {env_after}."
-                )
-            break
-    else:
-        raise RuntimeError("Verification failed: no .ipynb part returned")
+def _lookup_env_guid(ws, name: str) -> str | None:
+    body = _invoke(ws, "GET", f"{ws.base_api_url}/environments")
+    return next((e["id"] for e in body.get("value", []) if e.get("displayName") == name), None)
 
 
-def _lookup_environment_guid(fabric_workspace_obj, env_name: str) -> str | None:
-    """List workspace environments and return the GUID matching env_name."""
-    url = f"{fabric_workspace_obj.base_api_url}/environments"
-    resp = fabric_workspace_obj.endpoint.invoke(method="GET", url=url)
-    body = resp.get("body", {}) if isinstance(resp, dict) else {}
-    for env in body.get("value", []):
-        if env.get("displayName") == env_name:
-            return env.get("id")
-    return None
-
-
-def _wait_for_env_publish(fabric_workspace_obj, env_guid: str, timeout_s: int = 1200) -> None:
-    """
-    Poll /environments/{id} until publishDetails.state is terminal.
-    Fabric rejects notebook->env binding while a publish is Running,
-    so block here before calling updateDefinition.
-    """
-    url = f"{fabric_workspace_obj.base_api_url}/environments/{env_guid}"
+def _wait_for_env_publish(ws, env_guid: str, timeout_s: int = 1200) -> None:
+    """Block until publishDetails.state is terminal. Bind fails on Running."""
+    url = f"{ws.base_api_url}/environments/{env_guid}"
     deadline = time.monotonic() + timeout_s
-    last_state = None
+    last = None
     while time.monotonic() < deadline:
-        resp = fabric_workspace_obj.endpoint.invoke(method="GET", url=url)
-        body = resp.get("body", {}) if isinstance(resp, dict) else {}
-        details = body.get("properties", {}).get("publishDetails", {}) or {}
+        details = _invoke(ws, "GET", url).get("properties", {}).get("publishDetails", {}) or {}
         state = details.get("state")
-        comp = details.get("componentPublishInfo", {}) or {}
-        libs_state = (comp.get("sparkLibraries") or {}).get("state")
-        settings_state = (comp.get("sparkSettings") or {}).get("state")
-        if state != last_state:
-            print(f"  env publish state={state} sparkLibraries={libs_state} sparkSettings={settings_state}")
-            last_state = state
-        if state in ("Success", None) and libs_state in ("Success", None):
-            print("  env publish settled")
+        libs = (details.get("componentPublishInfo", {}) or {}).get("sparkLibraries", {}).get("state")
+        if state != last:
+            print(f"  env publish state={state} sparkLibraries={libs}")
+            last = state
+        if state in ("Success", None) and libs in ("Success", None):
             return
         if state in ("Failed", "Cancelled"):
-            raise RuntimeError(f"Environment publish ended in state={state} ({details})")
+            raise RuntimeError(f"Environment publish ended in state={state}")
         time.sleep(20)
-    raise RuntimeError(f"Timed out waiting {timeout_s}s for env publish to settle (last state={last_state})")
+    raise RuntimeError(f"Timed out after {timeout_s}s waiting for env publish (last={last})")
+
+
+def _get_ipynb_part(ws, nb_guid: str) -> dict:
+    """GET notebook definition as ipynb and return the .ipynb part."""
+    url = f"{ws.base_api_url}/notebooks/{nb_guid}/getDefinition?format=ipynb"
+    parts = _invoke(ws, "POST", url).get("definition", {}).get("parts", [])
+    part = next((p for p in parts if p.get("path", "").endswith(".ipynb")), None)
+    if part is None:
+        raise RuntimeError(f"getDefinition?format=ipynb returned no .ipynb part: {[p.get('path') for p in parts]}")
+    return part
+
+
+def _force_notebook_env_binding(ws, notebook_name: str) -> None:
+    """Re-bind notebook to PresidioPriv via ipynb-format updateDefinition (workaround #2)."""
+    print(f"==> Binding notebook '{notebook_name}' to '{ENV_NAME}'")
+    nb = ws.repository_items.get(ItemType.NOTEBOOK.value, {}).get(notebook_name)
+    if nb is None or not nb.guid:
+        print(f"  warn: notebook '{notebook_name}' not deployed; skipping")
+        return
+
+    env_item = ws.repository_items.get(ItemType.ENVIRONMENT.value, {}).get(ENV_NAME)
+    env_guid = (env_item.guid if env_item else None) or _lookup_env_guid(ws, ENV_NAME)
+    if not env_guid:
+        raise RuntimeError(f"environment '{ENV_NAME}' not found in workspace {ws.workspace_id}")
+    print(f"  environmentId={env_guid} workspaceId={ws.workspace_id}")
+
+    _wait_for_env_publish(ws, env_guid)
+
+    part = _get_ipynb_part(ws, nb.guid)
+    nb_json = json.loads(base64.b64decode(part["payload"]).decode("utf-8"))
+    nb_json.setdefault("metadata", {}).setdefault("dependencies", {})["environment"] = {
+        "environmentId": env_guid,
+        "workspaceId": ws.workspace_id,
+    }
+
+    # POST it back. Format goes inside the body; ?format=ipynb on the URL means
+    # "convert .py -> .ipynb" on this endpoint and is rejected.
+    url = f"{ws.base_api_url}/notebooks/{nb.guid}/updateDefinition"
+    body = {
+        "definition": {
+            "format": "ipynb",
+            "parts": [{
+                "path": part["path"],
+                "payload": base64.b64encode(json.dumps(nb_json, indent=2).encode("utf-8")).decode("ascii"),
+                "payloadType": "InlineBase64",
+            }],
+        },
+    }
+    _invoke(ws, "POST", url, body)
+    time.sleep(5)
+
+    after = json.loads(base64.b64decode(_get_ipynb_part(ws, nb.guid)["payload"]).decode("utf-8"))
+    bound = after.get("metadata", {}).get("dependencies", {}).get("environment", {})
+    if bound.get("environmentId") != env_guid:
+        raise RuntimeError(f"binding not persisted; expected {env_guid}, got {bound}")
+    print(f"  bound: {bound}")
 
 
 def main() -> None:
     workspace_id = os.environ["FABRIC_WORKSPACE_ID"]
-    environment = os.environ.get("FABRIC_ENVIRONMENT", "PPE")
-    # Override the API endpoint when the workspace blocks public inbound
-    # traffic (DEP / Private Link). fabric-cicd 1.0 still defaults to the
-    # legacy https://api.powerbi.com endpoint, which is rejected by DEP
-    # workspaces; force the Fabric endpoint by default.
-    base_api_url = os.environ.get("FABRIC_BASE_API_URL", "https://api.fabric.microsoft.com")
-    fabric_constants.DEFAULT_API_ROOT_URL = base_api_url
+    # WSPL/DEP workspaces reject the legacy api.powerbi.com endpoint that
+    # fabric-cicd 1.0 defaults to; force the Fabric endpoint.
+    fabric_constants.DEFAULT_API_ROOT_URL = os.environ.get(
+        "FABRIC_BASE_API_URL", "https://api.fabric.microsoft.com",
+    )
 
-    # Point fabric-cicd at the workspace folder that contains the
-    # source-controlled Fabric items. Folder layout mirrors what the
-    # Fabric Source Control UI produces.
-    repository_directory = str(Path(__file__).resolve().parent / "workspace")
-
-    # Item scope is overridable via env so the pipeline can do a fast
-    # notebook-only redeploy (skipping the 10-minute environment publish).
-    item_type_in_scope = [
-        s.strip()
-        for s in os.environ.get("FABRIC_ITEM_TYPES", "Environment,Notebook").split(",")
-        if s.strip()
-    ]
-    print(f"Item types in scope: {item_type_in_scope}")
+    item_types = [s.strip() for s in os.environ.get(
+        "FABRIC_ITEM_TYPES", "Environment,Notebook").split(",") if s.strip()]
+    print(f"Item types in scope: {item_types}")
 
     if os.environ.get("FABRIC_DEBUG", "").lower() in ("1", "true", "yes"):
         change_log_level("DEBUG")
 
     _patch_clear_environment_yml()
 
-    target_workspace = FabricWorkspace(
+    ws = FabricWorkspace(
         workspace_id=workspace_id,
-        environment=environment,
-        repository_directory=repository_directory,
-        item_type_in_scope=item_type_in_scope,
+        environment=os.environ.get("FABRIC_ENVIRONMENT", "PPE"),
+        repository_directory=str(Path(__file__).resolve().parent / "workspace"),
+        item_type_in_scope=item_types,
         token_credential=DefaultAzureCredential(),
     )
 
-    publish_all_items(target_workspace)
-
-    # Re-bind the smoke-test notebook to PresidioPriv via an ipynb-
-    # format round-trip. fabric-cicd publishes notebooks in
-    # `fabricGitSource` format, on which Fabric's updateDefinition
-    # silently strips the dependencies->environment block; the ipynb
-    # format preserves it. See _force_notebook_env_binding for details.
-    _force_notebook_env_binding(target_workspace, "PresidioSmokeTest")
-
-    # Only unpublish items that we own (safety guard:
-    # do not touch unrelated items if scope is widened later).
+    publish_all_items(ws)
+    _force_notebook_env_binding(ws, NOTEBOOK_NAME)
     unpublish_all_orphan_items(
-        target_workspace,
-        item_name_exclude_regex=r"^(?!PresidioPriv$|PresidioSmokeTest$).*",
+        ws, item_name_exclude_regex=rf"^(?!{ENV_NAME}$|{NOTEBOOK_NAME}$).*",
     )
 
 
