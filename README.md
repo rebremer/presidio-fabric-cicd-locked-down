@@ -142,9 +142,9 @@ Pipelines → `deploy-presidio-fabric` → **Edit → Variables**:
 | Name | Value |
 |---|---|
 | `AZURE_SERVICE_CONNECTION` | `<service-connection-name>` |
-| `FABRIC_WORKSPACE_ID`      | `fc5a31aa-23f6-4a07-9b8b-8df04c70facd` |
+| `FABRIC_WORKSPACE_ID`      | `<<your workspace ID>>` |
 | `FABRIC_BASE_API_URL`      | `https://<wsid-no-dashes>.zfc.w.api.fabric.microsoft.com` |
-| `FABRIC_ENVIRONMENT`       | `PPE` |
+| `FABRIC_ENVIRONMENT`       | `<<your Fabric environment name, e.g. presidioPriv>>` |
 
 ### 5. Discover the workspace's private FQDN
 
