@@ -234,10 +234,33 @@ workspace-private storage either way. Differences:
 ## Enhancements layered on top of fabric-cicd
 
 To make fabric-cicd, Azure DevOps and Presidio work together inside a
-WSPL + DEP locked-down Fabric workspace, `deploy.py` adds two thin shims
+WSPL + DEP locked-down Fabric workspace, `deploy.py` adds three thin shims
 around vanilla fabric-cicd. Everything else stays stock.
 
-### A. Clear `environment.yml` from staging before publish
+### A. Pin the API base URL to the workspace's private FQDN
+
+fabric-cicd 1.0 defaults `fabric_constants.DEFAULT_API_ROOT_URL` to
+`https://api.powerbi.com` (a Power BI heritage leftover that
+transparently proxies Fabric APIs on unrestricted tenants). That host
+isn't on the WSPL allow-list, so every call fails at the network layer
+before fabric-cicd hits any Fabric code path.
+
+`deploy.py` overrides the constant **before** constructing
+`FabricWorkspace` (it's read once, at `__init__` time):
+
+```python
+fabric_constants.DEFAULT_API_ROOT_URL = os.environ.get(
+    "FABRIC_BASE_API_URL", "https://api.fabric.microsoft.com",
+)
+```
+
+`FABRIC_BASE_API_URL` is set to the workspace's private FQDN
+(`https://<wsid>.zfc.w.api.fabric.microsoft.com`) so traffic rides the
+private endpoint end-to-end. fabric-cicd doesn't expose `base_api_url`
+as a constructor argument, so patching the module constant is the only
+seam without forking.
+
+### B. Clear `environment.yml` from staging before publish
 
 In a WSPL/DEP workspace the Fabric publish backend cannot reach pypi.org
 or conda-forge, so any `environment.yml` containing public dependencies
@@ -259,7 +282,7 @@ right after fabric-cicd uploads the definition and before it triggers
 publish. Net effect: staging ends up with `environmentYml: ""` plus the
 wheels — the same state a manually-created working env shows.
 
-### B. Bind the notebook to its environment via the `ipynb` format
+### C. Bind the notebook to its environment via the `ipynb` format
 
 The notebook source under `workspace/.../PresidioSmokeTest.Notebook/`
 uses Fabric's source-control format (`notebook-content.py` with `# META`
