@@ -71,6 +71,10 @@ stages:
               # https://api.fabric.microsoft.com if WSPL inbound does
               # not expose networking admin endpoints over the private FQDN).
               FABRIC_ADMIN_API_URL: $(FABRIC_ADMIN_API_URL)
+              # Set to 'true' to GET the current policy and skip the PUT
+              # (useful for discovering the rule sub-schema after editing
+              # rules in the Fabric portal).
+              DISCOVER_ONLY: $(DISCOVER_ONLY)
               POLICY_FILE: ${{ parameters.policyFile }}
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)

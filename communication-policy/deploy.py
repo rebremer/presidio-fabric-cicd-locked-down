@@ -98,6 +98,11 @@ def main() -> int:
         print("GET on /networking/communicationPolicy failed; not attempting PUT.")
         return 1
 
+    if os.environ.get("DISCOVER_ONLY", "").lower() in ("1", "true", "yes"):
+        print("DISCOVER_ONLY set -- skipping PUT (use the GET output above "
+              "to populate policy.json, then unset DISCOVER_ONLY).")
+        return 0
+
     # 3. PUT the desired policy.
     print(f"==> PUT {policy_url}")
     resp = requests.put(
