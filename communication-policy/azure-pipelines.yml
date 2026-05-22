@@ -66,6 +66,11 @@ stages:
             env:
               FABRIC_WORKSPACE_ID: $(FABRIC_WORKSPACE_ID)
               FABRIC_BASE_API_URL: $(FABRIC_BASE_API_URL)
+              # Optional: override the base URL used ONLY for the
+              # /networking/communicationPolicy call (e.g. set to
+              # https://api.fabric.microsoft.com if WSPL inbound does
+              # not expose networking admin endpoints over the private FQDN).
+              FABRIC_ADMIN_API_URL: $(FABRIC_ADMIN_API_URL)
               POLICY_FILE: ${{ parameters.policyFile }}
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
