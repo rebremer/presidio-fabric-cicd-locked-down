@@ -24,8 +24,8 @@
       "action": "Allow",
       "destinationType": "Fqdn",
       "destinations": [
-        "<your-storage-account>.dfs.core.windows.net",
-        "<your-storage-account>.blob.core.windows.net"
+        "testpubliclandingzone.dfs.core.windows.net",
+        "testpubliclandingzone.blob.core.windows.net"
       ]
     }
   ]
