@@ -1,32 +1,24 @@
 {
   "_comment": [
-    "Workspace communication policy (data connection rules) for a WSPL/DEP-",
-    "locked-down Fabric workspace. Applied by communication-policy/deploy.py",
-    "via PUT to:",
-    "  {FABRIC_BASE_API_URL}/v1/workspaces/{FABRIC_WORKSPACE_ID}/networking/communicationPolicy",
+    "Workspace communication policy for a WSPL/DEP-locked-down Fabric workspace.",
+    "Applied by communication-policy/deploy.py via PUT to:",
+    "  {FABRIC_ADMIN_API_URL}/v1/workspaces/{FABRIC_WORKSPACE_ID}/networking/communicationPolicy",
     "",
-    "defaultAction: Deny  -> deny all outbound except rules below (DEP posture).",
-    "Each rule whitelists outbound traffic from Spark to a specific destination",
-    "(FQDN tag, FQDN, or Azure service). Adjust to your data sources."
+    "Schema (as returned by GET on the same endpoint):",
+    "  inbound.publicAccessRules.defaultAction  -> Deny = WSPL (no public inbound)",
+    "  outbound.publicAccessRules.defaultAction -> Deny = DEP (no public outbound)",
+    "",
+    "Add explicit allow rules under inbound/outbound per the Fabric REST docs",
+    "for this endpoint once the rule sub-schema is confirmed for your tenant."
   ],
-  "defaultAction": "Deny",
-  "rules": [
-    {
-      "name": "AllowPublicSuffixList",
-      "action": "Allow",
-      "destinationType": "Fqdn",
-      "destinations": [
-        "publicsuffix.org"
-      ]
-    },
-    {
-      "name": "AllowAdlsGen2Sample",
-      "action": "Allow",
-      "destinationType": "Fqdn",
-      "destinations": [
-        "testpubliclandingzone.dfs.core.windows.net",
-        "testpubliclandingzone.blob.core.windows.net"
-      ]
+  "inbound": {
+    "publicAccessRules": {
+      "defaultAction": "Deny"
     }
-  ]
+  },
+  "outbound": {
+    "publicAccessRules": {
+      "defaultAction": "Deny"
+    }
+  }
 }

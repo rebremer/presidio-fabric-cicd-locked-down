@@ -61,8 +61,12 @@ def main() -> int:
         return 2
 
     policy = _strip_comments(json.loads(policy_path.read_text(encoding="utf-8")))
-    print(f"Rules in policy: {len(policy.get('rules', []))} "
-          f"(defaultAction={policy.get('defaultAction')})")
+    inbound = (policy.get("inbound", {}).get("publicAccessRules", {})
+               .get("defaultAction"))
+    outbound = (policy.get("outbound", {}).get("publicAccessRules", {})
+                .get("defaultAction"))
+    print(f"Policy posture: inbound.defaultAction={inbound} "
+          f"outbound.defaultAction={outbound}")
 
     token = DefaultAzureCredential().get_token(FABRIC_SCOPE).token
     headers = {"Authorization": f"Bearer {token}"}
