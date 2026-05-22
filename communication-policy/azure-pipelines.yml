@@ -1,0 +1,82 @@
+# Azure DevOps pipeline: apply workspace communication policy
+# (outbound "data connection rules") to a WSPL/DEP-protected Fabric workspace.
+#
+# Reuses the same self-hosted Linux agent + UAMI/WIF service connection as
+# azure-pipelines.yml. The agent must:
+#   - have outbound internet to pypi.org and dev.azure.com
+#   - have private DNS resolution for the workspace's WSPL FQDN
+#     (VNet linked to privatelink.fabric.microsoft.com zone)
+#
+# Pipeline variables (set in ADO -> Pipelines -> Edit -> Variables):
+#   AZURE_SERVICE_CONNECTION = <UAMI/WIF service connection name>
+#   FABRIC_WORKSPACE_ID      = <workspace GUID>
+#   FABRIC_BASE_API_URL      = https://<wsid-no-dashes>.zfc.w.api.fabric.microsoft.com
+#
+# API: PUT /v1/workspaces/{id}/networking/communicationPolicy
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - communication-policy/**
+
+pr: none
+
+parameters:
+  - name: policyFile
+    displayName: Path to the communication policy JSON file
+    type: string
+    default: communication-policy/policy.json
+
+pool:
+  name: Default
+  demands:
+    - Agent.OS -equals Linux
+
+stages:
+  - stage: ApplyPolicy
+    displayName: Apply communication policy
+    jobs:
+      - job: apply
+        displayName: PUT communicationPolicy
+        timeoutInMinutes: 15
+        steps:
+          - checkout: self
+            displayName: Checkout sources
+
+          - bash: |
+              set -euo pipefail
+              echo "Agent OS:    $(uname -a)"
+              echo "Python:      $(python3 --version)"
+              echo "Az CLI:      $(az --version | head -n 1)"
+              echo "Policy file: ${{ parameters.policyFile }}"
+              test -f "${{ parameters.policyFile }}"
+            displayName: Show toolchain + verify policy file exists
+
+          - bash: |
+              set -euo pipefail
+              python3 -m pip install --user --upgrade pip
+              python3 -m pip install --user -r communication-policy/requirements.txt
+            displayName: Install azure-identity + requests
+
+          - task: AzureCLI@2
+            displayName: Apply communication policy
+            env:
+              FABRIC_WORKSPACE_ID: $(FABRIC_WORKSPACE_ID)
+              FABRIC_BASE_API_URL: $(FABRIC_BASE_API_URL)
+              POLICY_FILE: ${{ parameters.policyFile }}
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+                export AZURE_TENANT_ID="$tenantId"
+                export AZURE_CLIENT_ID="$servicePrincipalId"
+                # WIF: no client secret. AzureCLI@2 leaves an authenticated
+                # az session; DefaultAzureCredential -> AzureCliCredential
+                # will reuse it.
+                python3 communication-policy/deploy.py

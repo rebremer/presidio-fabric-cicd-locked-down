@@ -1,0 +1,32 @@
+{
+  "_comment": [
+    "Workspace communication policy (data connection rules) for a WSPL/DEP-",
+    "locked-down Fabric workspace. Applied by communication-policy/deploy.py",
+    "via PUT to:",
+    "  {FABRIC_BASE_API_URL}/v1/workspaces/{FABRIC_WORKSPACE_ID}/networking/communicationPolicy",
+    "",
+    "defaultAction: Deny  -> deny all outbound except rules below (DEP posture).",
+    "Each rule whitelists outbound traffic from Spark to a specific destination",
+    "(FQDN tag, FQDN, or Azure service). Adjust to your data sources."
+  ],
+  "defaultAction": "Deny",
+  "rules": [
+    {
+      "name": "AllowPublicSuffixList",
+      "action": "Allow",
+      "destinationType": "Fqdn",
+      "destinations": [
+        "publicsuffix.org"
+      ]
+    },
+    {
+      "name": "AllowAdlsGen2Sample",
+      "action": "Allow",
+      "destinationType": "Fqdn",
+      "destinations": [
+        "<your-storage-account>.dfs.core.windows.net",
+        "<your-storage-account>.blob.core.windows.net"
+      ]
+    }
+  ]
+}
