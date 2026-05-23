@@ -87,15 +87,19 @@ stages:
             env:
               FABRIC_WORKSPACE_ID: $(FABRIC_WORKSPACE_ID)
               FABRIC_BASE_API_URL: $(FABRIC_BASE_API_URL)
-              # Optional: override the base URL used ONLY for the
-              # /networking/communicationPolicy call (e.g. set to
-              # https://api.fabric.microsoft.com if WSPL inbound does
-              # not expose networking admin endpoints over the private FQDN).
-              FABRIC_ADMIN_API_URL: $(FABRIC_ADMIN_API_URL)
-              # Set to 'true' to GET the current policy and skip the PUT
-              # (useful for discovering the rule sub-schema after editing
-              # rules in the Fabric portal).
-              DISCOVER_ONLY: $(DISCOVER_ONLY)
+              # Optional overrides -- define as pipeline variables in ADO to
+              # enable, otherwise leave unset:
+              #   FABRIC_ADMIN_API_URL  override base URL used ONLY for the
+              #                         /networking/communicationPolicy call
+              #                         (e.g. https://api.fabric.microsoft.com
+              #                         if WSPL inbound does not expose
+              #                         networking admin endpoints over the
+              #                         private FQDN). Defaults to
+              #                         FABRIC_BASE_API_URL in deploy.py.
+              #   DISCOVER_ONLY=true    GET current policy and skip PUT.
+              # NOTE: do NOT reference $(FABRIC_ADMIN_API_URL) / $(DISCOVER_ONLY)
+              # here -- ADO leaves $(VAR) as a literal string when the
+              # pipeline variable is undefined, which breaks deploy.py.
               POLICY_FILE: ${{ parameters.policyFile }}
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
