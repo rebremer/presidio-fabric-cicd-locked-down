@@ -33,6 +33,7 @@ trigger:
       - requirements-deploy.txt
       - requirements-presidio.txt
       - azure-pipelines.yml
+      - communication-policy/**
 
 pr: none
 
@@ -41,6 +42,10 @@ parameters:
     displayName: Skip environment publish (notebook-only redeploy + smoke test)
     type: boolean
     default: false
+  - name: policyFile
+    displayName: Path to the communication policy JSON file
+    type: string
+    default: communication-policy/policy.json
 
 pool:
   name: Default
@@ -52,8 +57,67 @@ variables:
     value: workspace/16_presidio/PresidioPriv.Environment/Libraries/CustomLibraries
 
 stages:
+  - stage: ApplyPolicy
+    displayName: Apply communication policy
+    jobs:
+      - job: apply
+        displayName: PUT communicationPolicy
+        timeoutInMinutes: 15
+        steps:
+          - checkout: self
+            displayName: Checkout sources
+
+          - bash: |
+              set -euo pipefail
+              echo "Agent OS:    $(uname -a)"
+              echo "Python:      $(python3 --version)"
+              echo "Az CLI:      $(az --version | head -n 1)"
+              echo "Policy file: ${{ parameters.policyFile }}"
+              test -f "${{ parameters.policyFile }}"
+            displayName: Show toolchain + verify policy file exists
+
+          - bash: |
+              set -euo pipefail
+              python3 -m pip install --user --upgrade pip
+              python3 -m pip install --user -r communication-policy/requirements.txt
+            displayName: Install azure-identity + requests
+
+          - task: AzureCLI@2
+            displayName: Apply communication policy
+            env:
+              FABRIC_WORKSPACE_ID: $(FABRIC_WORKSPACE_ID)
+              FABRIC_BASE_API_URL: $(FABRIC_BASE_API_URL)
+              # Optional: override the base URL used ONLY for the
+              # /networking/communicationPolicy call (e.g. set to
+              # https://api.fabric.microsoft.com if WSPL inbound does
+              # not expose networking admin endpoints over the private FQDN).
+              FABRIC_ADMIN_API_URL: $(FABRIC_ADMIN_API_URL)
+              # Set to 'true' to GET the current policy and skip the PUT
+              # (useful for discovering the rule sub-schema after editing
+              # rules in the Fabric portal).
+              DISCOVER_ONLY: $(DISCOVER_ONLY)
+              POLICY_FILE: ${{ parameters.policyFile }}
+            inputs:
+              azureSubscription: $(AZURE_SERVICE_CONNECTION)
+              scriptType: bash
+              scriptLocation: inlineScript
+              addSpnToEnvironment: true
+              inlineScript: |
+                set -euo pipefail
+                export AZURE_TENANT_ID="$tenantId"
+                export AZURE_CLIENT_ID="$servicePrincipalId"
+                # WIF: no client secret. AzureCLI@2 leaves an authenticated
+                # az session; DefaultAzureCredential -> AzureCliCredential
+                # will reuse it.
+                python3 communication-policy/deploy.py
+
   - stage: Deploy
     displayName: Publish to Fabric
+    # Block env+notebook publish behind a successful policy apply: if the
+    # communication policy fails to apply, we must not push an environment
+    # whose runtime egress rules would then be undefined / stale.
+    dependsOn: ApplyPolicy
+    condition: succeeded()
     jobs:
       - job: publish
         displayName: fabric-cicd publish (Linux)
