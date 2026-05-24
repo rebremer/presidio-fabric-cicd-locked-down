@@ -22,12 +22,8 @@ VNet, authenticated to Fabric via a **User-Assigned Managed Identity** and
 3. Create an ADO service connection (UAMI + Workload Identity Federation),
    grant the UAMI **Contributor** on the Fabric workspace.
 4. Set the four pipeline variables (see [Pipeline variables](#4-pipeline-variables)).
-5. Apply the workspace **communication policy** once (and again whenever
-   it changes) via the separate platform pipeline at
-   [communication-policy/azure-pipelines.yml](communication-policy/azure-pipelines.yml)
-   (see [Workspace communication policy](#workspace-communication-policy) below).
-6. `git push` to `main` → workload pipeline publishes the `PresidioPriv`
-   Environment and binds `PresidioSmokeTest` to it.
+5. `git push` to `main` → pipeline publishes the `PresidioPriv` Environment
+   and binds `PresidioSmokeTest` to it.
 
 For fast iteration after the env is already published, run the pipeline
 with `skipEnvPublish=true` to skip the ~10-minute env publish and only
@@ -76,21 +72,16 @@ republish + re-bind the notebook.
 
 ```
 .
-├── azure-pipelines.yml             # Workload pipeline: env + notebook publish
+├── azure-pipelines.yml             # ADO pipeline (Linux demand, manylinux pip download)
 ├── deploy.py                       # fabric-cicd entry point + monkey-patch
 ├── requirements-deploy.txt         # fabric-cicd + azure-identity (agent-side)
 ├── requirements-presidio.txt       # Presidio + spaCy model
-├── communication-policy/           # Platform pipeline (separate concern)
-│   ├── azure-pipelines.yml         # PUT /networking/communicationPolicy
-│   ├── deploy.py
-│   ├── policy.json                 # inbound + outbound = Deny
-│   └── requirements.txt
 ├── infra/
 │   └── agent-vm.bicep              # Bicep for the Ubuntu ADO agent VM
 ├── scripts/
 │   ├── setup-agent.sh              # Bootstrap the Ubuntu agent VM
 │   └── setup-agent.ps1             # (legacy) Windows agent bootstrap
-└── workspace/
+├── workspace/
     ├── parameter.yml               # fabric-cicd find_replace / spark_pool
     └── 16_presidio/
         ├── PresidioPriv.Environment/
@@ -165,42 +156,6 @@ az resource show --ids $nic `
 ```
 
 Use the `…zfc.w.api.fabric.microsoft.com` record for `FABRIC_BASE_API_URL`.
-
-### 6. Admin endpoint routing (control plane)
-
-Fabric admin/networking endpoints (e.g.
-`/v1/workspaces/{id}/networking/communicationPolicy`) are **control-plane**
-APIs and are not projected onto the workspace's private FQDN. Calling them
-over `…zfc.w.api.fabric.microsoft.com` returns
-`403 RequestDeniedByInboundPolicy`. The platform pipeline hard-codes
-`FABRIC_ADMIN_API_URL: https://api.fabric.microsoft.com` to route that
-call to the public Fabric control plane instead. The self-hosted agent
-already has outbound internet, so this works as-is.
-
-**Optional — keep admin calls on private link too.** If you want the
-control-plane call to also traverse private link, enable
-[tenant-level Azure Private Link for Fabric](https://learn.microsoft.com/fabric/security/security-private-links-use)
-and link the three private DNS zones
-(`privatelink.analysis.windows.net`, `privatelink.pbidedicated.windows.net`,
-`privatelink.prod.powerquery.microsoft.com`) to the agent's VNet. Once
-`api.fabric.microsoft.com` resolves to the tenant PE's private IP from
-the agent, no pipeline change is needed — the existing
-`FABRIC_ADMIN_API_URL` value transparently rides the private path. You
-do **not** need to enable *Block Public Internet Access* for this to work.
-
-## Workspace communication policy
-
-The communication policy is **platform/governance infra** with a
-different lifecycle from the Presidio workload: rare changes, security
-ownership, workspace-wide blast radius. It lives in a separate pipeline
-([communication-policy/azure-pipelines.yml](communication-policy/azure-pipelines.yml))
-that only triggers on changes under `communication-policy/**`.
-
-The workload pipeline does **not** depend on it: the policy is treated as
-standing infra, the same way WSPL + DEP enablement on the workspace is
-treated as standing infra. Apply the policy once after creating the
-workspace; re-apply only when [policy.json](communication-policy/policy.json)
-changes.
 
 ## Run it
 
@@ -371,3 +326,44 @@ is `Running`.
   <https://learn.microsoft.com/fabric/data-engineering/environment-manage-library-with-outbound-access-protection>
 - How to How to Anonymize and Share PII in Microsoft Fabric:
   <https://medium.com/data-science-collective/how-to-anonymize-and-share-pii-in-microsoft-fabric-670eaf9cd2be>
+
+## Appendix: managing the workspace communication policy from CI
+
+The Presidio workload pipeline assumes the workspace's communication
+policy (inbound + outbound `Deny` plus any explicit allow rules) is
+already applied — it's treated as standing platform/governance infra,
+the same way WSPL + DEP enablement is. Configuring the policy is out of
+scope for the workload pipeline.
+
+If you also want to manage that policy from code (different lifecycle:
+rare changes, security ownership, workspace-wide blast radius), this
+repo ships an **optional second pipeline** under
+[communication-policy/](communication-policy/):
+
+| File | Purpose |
+|---|---|
+| [communication-policy/azure-pipelines.yml](communication-policy/azure-pipelines.yml) | ADO pipeline, triggers only on `communication-policy/**`. |
+| [communication-policy/policy.json](communication-policy/policy.json) | Policy document (`inbound`/`outbound` defaults, allow rules). |
+| [communication-policy/deploy.py](communication-policy/deploy.py) | `PUT /v1/workspaces/{id}/networking/communicationPolicy`. |
+
+A few things to know if you adopt it:
+
+### Private endpoints used by each pipeline
+
+The two pipelines hit different Fabric planes and therefore need
+different private endpoints if you want both on private link:
+
+| Pipeline | Plane | Endpoint hit | Private endpoint type | Private DNS zone(s) |
+|---|---|---|---|---|
+| Workload (env + notebook) | Data | `<wsid>.zfc.w.api.fabric.microsoft.com` | **Workspace-level** PE on the Fabric workspace (sub-resource = `workspace`) | `privatelink.fabric.microsoft.com` |
+| Communication policy | Control | `api.fabric.microsoft.com` (`/v1/workspaces/{id}/networking/communicationPolicy`) | **Tenant-level** PE on `Microsoft.PowerBI/privateLinkServicesForPowerBI` (sub-resource = `Tenant`) | `privatelink.analysis.windows.net`, `privatelink.pbidedicated.windows.net`, `privatelink.prod.powerquery.microsoft.com` |
+
+The workspace-level PE is the **required** one (the workload pipeline
+won't work without it). The tenant-level PE is **optional** — without it,
+the policy pipeline still works, it just routes the admin call over the
+public Fabric control plane via the agent's outbound internet. See
+[tenant-level Azure Private Link for Fabric](https://learn.microsoft.com/fabric/security/security-private-links-use)
+for the tenant-PE setup; *Block Public Internet Access* on the tenant is
+**not** required for the routing to take effect.
+
+
