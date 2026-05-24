@@ -29,6 +29,10 @@ parameters:
     displayName: Path to the communication policy JSON file
     type: string
     default: communication-policy/policy.json
+  - name: discoverOnly
+    displayName: Discover only (GET current policy, skip PUT)
+    type: boolean
+    default: false
 
 pool:
   name: Default
@@ -76,10 +80,10 @@ stages:
               #  api.fabric.microsoft.com transparently resolves to the
               #  tenant PE's private IP and rides the private path.)
               FABRIC_ADMIN_API_URL: https://api.fabric.microsoft.com
-              # Optional: define DISCOVER_ONLY=true as a pipeline variable
-              # to GET the current policy and skip the PUT. Do NOT reference
-              # $(DISCOVER_ONLY) here -- ADO leaves $(VAR) as a literal
-              # string when the variable is undefined.
+              # Set discoverOnly=true on the run to GET the current policy
+              # and skip the PUT (useful for inspecting per-connection-type
+              # rules so they can be added to policy.json verbatim).
+              DISCOVER_ONLY: ${{ parameters.discoverOnly }}
               POLICY_FILE: ${{ parameters.policyFile }}
             inputs:
               azureSubscription: $(AZURE_SERVICE_CONNECTION)
