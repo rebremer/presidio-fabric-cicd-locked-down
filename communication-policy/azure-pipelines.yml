@@ -59,12 +59,6 @@ stages:
               test -f "${{ parameters.policyFile }}"
             displayName: Show toolchain + verify policy file exists
 
-          - bash: |
-              set -euo pipefail
-              python3 -m pip install --user --upgrade pip
-              python3 -m pip install --user -r communication-policy/requirements.txt
-            displayName: Install azure-identity + requests
-
           - task: AzureCLI@2
             displayName: Apply communication policy
             env:
@@ -92,9 +86,8 @@ stages:
               addSpnToEnvironment: true
               inlineScript: |
                 set -euo pipefail
-                export AZURE_TENANT_ID="$tenantId"
-                export AZURE_CLIENT_ID="$servicePrincipalId"
-                # WIF: no client secret. AzureCLI@2 leaves an authenticated
-                # az session; DefaultAzureCredential -> AzureCliCredential
-                # will reuse it.
+                # deploy.py uses Python stdlib only and calls
+                # `az account get-access-token` for auth, so no pip install
+                # is required. This lets the pipeline run under the
+                # restrictive agent NSG (no PyPI egress).
                 python3 communication-policy/deploy.py

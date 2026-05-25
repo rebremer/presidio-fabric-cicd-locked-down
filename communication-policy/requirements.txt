@@ -1,2 +1,3 @@
-azure-identity>=1.17.0
-requests>=2.32.0
+# communication-policy/deploy.py has no third-party dependencies.
+# It uses Python stdlib (urllib) and shells out to the Azure CLI for auth,
+# so it runs under the restrictive agent NSG without needing PyPI egress.
