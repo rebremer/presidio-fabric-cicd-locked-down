@@ -368,13 +368,18 @@ for the tenant-PE setup; *Block Public Internet Access* on the tenant is
 
 ### Proving the policy pipeline uses the tenant PE
 
-[infra/agent-vm.bicep](infra/agent-vm.bicep) exposes `applyRestrictiveNsg`
-(default `false`). When `true`, the NIC NSG denies all public outbound
-except `AzureDevOps`, `AzureFrontDoor.FirstParty`, `AzureActiveDirectory`,
-`AzureResourceManager` and intra-VNet. If the policy `PUT` still
-succeeds under this lockdown, `api.fabric.microsoft.com` necessarily
-resolved to the tenant PE. `deploy.py` is stdlib-only so it needs no
-PyPI access; turn the lockdown off again before any run that downloads
-packages.
+With *Block Public Internet Access* **off** on the tenant (the common
+case if you also run workspaces that need public access), Fabric accepts
+both the public and the private path to `api.fabric.microsoft.com`, so
+DNS + routing decide which one a given call takes. To verify that the
+policy pipeline really goes via the tenant PE,
+[infra/agent-vm.bicep](infra/agent-vm.bicep) exposes
+`applyRestrictiveNsg` (default `false`). When `true`, the NIC NSG denies
+all public outbound except `AzureDevOps`, `AzureFrontDoor.FirstParty`,
+`AzureActiveDirectory`, `AzureResourceManager` and intra-VNet. If the
+policy `PUT` still succeeds under that lockdown,
+`api.fabric.microsoft.com` necessarily resolved to the tenant PE.
+`deploy.py` is stdlib-only so it needs no PyPI access; turn the lockdown
+off before any run that downloads packages.
 
 
