@@ -23,7 +23,7 @@ param location string = resourceGroup().location
 param vmSize string = 'Standard_B4ms'
 
 @description('Admin username.')
-param adminUsername string = 'bremerov'
+param adminUsername string = 'azureuser'
 
 @description('Admin password. Must be 12-72 chars and meet Azure complexity rules (upper, lower, digit, symbol).')
 @secure()
@@ -38,8 +38,8 @@ param vnetName string = 'test-fabric-vnet'
 @description('Name of the existing subnet to attach the NIC to.')
 param subnetName string = 'snet-westus3-1'
 
-@description('Set true to attach a public IP for direct SSH. Set false if you SSH via the existing Windows jumpbox.')
-param assignPublicIp bool = false
+@description('Attach a Standard public IP to the NIC. Required because Azure retired "default outbound access" for VMs (Sep 2025): without a public IP, NAT gateway, or LB outbound rule, the VM has no SNAT path and cannot reach the internet -- even for AAD or Azure DevOps. Set false only if you have already attached a NAT gateway to the subnet or otherwise provided outbound.')
+param assignPublicIp bool = true
 
 @description('Attach a restrictive NSG that denies all public outbound except the service tags required for the Azure DevOps self-hosted agent and Azure CLI auth. ONLY enable this to demonstrate that the Fabric workspace communication policy (WSPL/DEP) forces traffic over the private endpoint. It MUST be disabled while the Presidio environment is being built, because conda/pip need public package repos (conda-forge, PyPI, Ubuntu archives) that are not reachable under this lockdown.')
 param applyRestrictiveNsg bool = false

@@ -366,4 +366,15 @@ public Fabric control plane via the agent's outbound internet. See
 for the tenant-PE setup; *Block Public Internet Access* on the tenant is
 **not** required for the routing to take effect.
 
+### Proving the policy pipeline uses the tenant PE
+
+[infra/agent-vm.bicep](infra/agent-vm.bicep) exposes `applyRestrictiveNsg`
+(default `false`). When `true`, the NIC NSG denies all public outbound
+except `AzureDevOps`, `AzureFrontDoor.FirstParty`, `AzureActiveDirectory`,
+`AzureResourceManager` and intra-VNet. If the policy `PUT` still
+succeeds under this lockdown, `api.fabric.microsoft.com` necessarily
+resolved to the tenant PE. `deploy.py` is stdlib-only so it needs no
+PyPI access; turn the lockdown off again before any run that downloads
+packages.
+
 
